@@ -14,7 +14,9 @@ import (
 	"github.com/iloremstudio/home-bot/internal/infrastructure/groq"
 	"github.com/iloremstudio/home-bot/internal/infrastructure/telegram"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"net/http"
 )
+
 
 func main() {
 	log.Println("Iniciando backend del Bot de Gestión del Hogar y Disciplina...")
@@ -105,10 +107,32 @@ func main() {
 	// 9. Start Telegram Bot in a goroutine
 	go bot.Start(ctx)
 
+	// 10. Start dummy HTTP server to satisfy Render health check port scanning
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	go func() {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("OK"))
+		})
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("Bot is running!"))
+		})
+		log.Printf("Iniciando servidor HTTP de salud en puerto %s...", port)
+		if err := http.ListenAndServe(":"+port, mux); err != nil {
+			log.Printf("Error en el servidor HTTP de salud: %v", err)
+		}
+	}()
+
 	log.Println("El bot está corriendo. Presiona Ctrl+C para salir.")
 
 	// Wait for shutdown signal
 	<-ctx.Done()
+
 	log.Println("Apagando el servidor con gracia (Graceful Shutdown)...")
 	
 	// Give database and connections time to close cleanly
