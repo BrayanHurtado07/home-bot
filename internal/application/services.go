@@ -403,9 +403,31 @@ func (s *AppService) LogHabitCheckIn(ctx context.Context, tgUserID int64, seqNum
 		return err
 	}
 
+	tz := h.Timezone
+	if tz == "" {
+		tz = "America/Bogota"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		loc = time.UTC
+	}
+	nowLocal := time.Now().In(loc)
+	localMidnight := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
+
+	// Check if already completed today
+	logs, err := s.habitLogRepo.GetLogsByHabitID(ctx, h.ID)
+	if err == nil {
+		todayStr := localMidnight.Format("2006-01-02")
+		for _, l := range logs {
+			if l.Status == "completed" && l.LoggedDate.Format("2006-01-02") == todayStr {
+				return fmt.Errorf("este hábito ya fue registrado como completado el día de hoy")
+			}
+		}
+	}
+
 	logEntry := &domain.HabitLog{
 		HabitID:    h.ID,
-		LoggedDate: time.Now().UTC(),
+		LoggedDate: localMidnight,
 		Status:     status,
 	}
 
@@ -414,7 +436,7 @@ func (s *AppService) LogHabitCheckIn(ctx context.Context, tgUserID int64, seqNum
 		return err
 	}
 
-	h.ProgressStatus = fmt.Sprintf("Completado Hoy (%s)", time.Now().Format("02/01"))
+	h.ProgressStatus = fmt.Sprintf("Completado Hoy (%s)", nowLocal.Format("02/01"))
 	return s.habitRepo.Update(ctx, h)
 }
 
@@ -430,7 +452,6 @@ func (s *AppService) GetPersonalHabitsWithStreak(ctx context.Context, tgUserID i
 	}
 
 	var results []*HabitWithStreak
-	today := time.Now().UTC()
 
 	for _, h := range habits {
 		logs, err := s.habitLogRepo.GetLogsByHabitID(ctx, h.ID)
@@ -438,15 +459,38 @@ func (s *AppService) GetPersonalHabitsWithStreak(ctx context.Context, tgUserID i
 			return nil, err
 		}
 
-		streak := CalculateStreak(logs, today)
+		tz := h.Timezone
+		if tz == "" {
+			tz = "America/Bogota"
+		}
+		loc, err := time.LoadLocation(tz)
+		if err != nil {
+			loc = time.UTC
+		}
+		nowLocal := time.Now().In(loc)
+		localMidnight := time.Date(nowLocal.Year(), nowLocal.Month(), nowLocal.Day(), 0, 0, 0, 0, time.UTC)
+
+		streak := CalculateStreak(logs, localMidnight)
+
+		completedToday := false
+		todayStr := localMidnight.Format("2006-01-02")
+		for _, l := range logs {
+			if l.Status == "completed" && l.LoggedDate.Format("2006-01-02") == todayStr {
+				completedToday = true
+				break
+			}
+		}
+
 		results = append(results, &HabitWithStreak{
-			Habit:  h,
-			Streak: streak,
+			Habit:          h,
+			Streak:         streak,
+			CompletedToday: completedToday,
 		})
 	}
 
 	return results, nil
 }
+
 
 func (s *AppService) DeletePersonalHabit(ctx context.Context, tgUserID int64, seqNum int) error {
 	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
@@ -580,8 +624,9 @@ Historial reciente de la conversación (Resumen condensado):
 }
 
 type HabitWithStreak struct {
-	Habit  *domain.PersonalHabit
-	Streak int
+	Habit          *domain.PersonalHabit
+	Streak         int
+	CompletedToday bool
 }
 
 func CalculateStreak(logs []*domain.HabitLog, today time.Time) int {

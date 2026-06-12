@@ -743,14 +743,36 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, cb *tgbotapi.CallbackQuer
 			editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, fmt.Sprintf("🗑️ Hábito Nro %d eliminado.", targetSeqNum))
 			_, _ = b.api.Send(editMsg)
 		}
+	case "completedToday":
+		return
+
 	case "updateHabit":
 		err := b.appService.LogHabitCheckIn(ctx, userID, targetSeqNum, "completed")
 		if err != nil {
-			b.sendText(userID, "❌ Error al registrar el hábito: "+err.Error())
+			b.sendText(userID, "❌ "+err.Error())
 		} else {
 			b.sendText(userID, "🎉 ¡Felicidades por completar tu hábito de hoy!")
-			b.listHabits(ctx, userID)
+			habitsWithStreak, err := b.appService.GetPersonalHabitsWithStreak(ctx, userID)
+			if err == nil {
+				for _, hs := range habitsWithStreak {
+					if hs.Habit.SeqNum == targetSeqNum {
+						text := fmt.Sprintf("💪 *Hábito Nro %d:* %s\n🗓️ *Días:* %s\n🔥 *Racha:* %d días\n📈 *Progreso:* %s\n", 
+							hs.Habit.SeqNum, hs.Habit.ActivityType, hs.Habit.ScheduledDays, hs.Streak, hs.Habit.ProgressStatus)
+						
+						btnDone := tgbotapi.NewInlineKeyboardButtonData("✅ Completado Hoy", "completedToday_0")
+						btnDel := tgbotapi.NewInlineKeyboardButtonData("🗑️ Borrar", fmt.Sprintf("deleteHabit_%d", hs.Habit.SeqNum))
+						kb := tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnDone, btnDel})
+
+						editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, text)
+						editMsg.ParseMode = tgbotapi.ModeMarkdown
+						editMsg.ReplyMarkup = &kb
+						_, _ = b.api.Send(editMsg)
+						break
+					}
+				}
+			}
 		}
+
 
 	case "cookShowSchedule":
 		text, err := b.buildKitchenScheduleText(ctx, userID)
@@ -1356,9 +1378,15 @@ func (b *Bot) listHabits(ctx context.Context, userID int64) {
 		text := fmt.Sprintf("💪 *Hábito Nro %d:* %s\n🗓️ *Días:* %s\n🔥 *Racha:* %d días\n📈 *Progreso:* %s\n", 
 			hs.Habit.SeqNum, hs.Habit.ActivityType, hs.Habit.ScheduledDays, hs.Streak, hs.Habit.ProgressStatus)
 
-		btnDone := tgbotapi.NewInlineKeyboardButtonData("🔥 Completar Hoy", fmt.Sprintf("updateHabit_%d", hs.Habit.SeqNum))
+		var kb tgbotapi.InlineKeyboardMarkup
 		btnDel := tgbotapi.NewInlineKeyboardButtonData("🗑️ Borrar", fmt.Sprintf("deleteHabit_%d", hs.Habit.SeqNum))
-		kb := tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnDone, btnDel})
+		if hs.CompletedToday {
+			btnDone := tgbotapi.NewInlineKeyboardButtonData("✅ Completado Hoy", "completedToday_0")
+			kb = tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnDone, btnDel})
+		} else {
+			btnDone := tgbotapi.NewInlineKeyboardButtonData("🔥 Completar Hoy", fmt.Sprintf("updateHabit_%d", hs.Habit.SeqNum))
+			kb = tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnDone, btnDel})
+		}
 
 		msg := tgbotapi.NewMessage(userID, text)
 		msg.ParseMode = tgbotapi.ModeMarkdown
@@ -1366,6 +1394,7 @@ func (b *Bot) listHabits(ctx context.Context, userID int64) {
 		_, _ = b.api.Send(msg)
 	}
 }
+
 
 // Menu layout helpers
 func (b *Bot) sendWelcome(userID int64, user *domain.User) {
