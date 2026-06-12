@@ -88,6 +88,40 @@ CREATE TABLE IF NOT EXISTS habit_logs (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uniq_habit_day UNIQUE(habit_id, logged_date)
 );
+
+CREATE TABLE IF NOT EXISTS business_stores (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    store_name VARCHAR(100) NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS store_products (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id UUID NOT NULL REFERENCES business_stores(id) ON DELETE CASCADE,
+    name VARCHAR(150) NOT NULL,
+    price NUMERIC(10, 2) NOT NULL,
+    stock INT NOT NULL DEFAULT -1,
+    seq_num INT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uniq_store_product_seq UNIQUE(store_id, seq_num)
+);
+
+CREATE TABLE IF NOT EXISTS store_orders (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    store_id UUID NOT NULL REFERENCES business_stores(id) ON DELETE CASCADE,
+    client_name VARCHAR(100) NOT NULL,
+    client_phone VARCHAR(30),
+    product_details TEXT NOT NULL,
+    total_cost NUMERIC(10, 2) NOT NULL,
+    advance_payment NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    shipping_address TEXT,
+    shipping_cost NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
+    status VARCHAR(30) NOT NULL CHECK (status IN ('advance_paid', 'pending_shipment', 'shipped', 'delivered', 'completed')),
+    seq_num INT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uniq_store_order_seq UNIQUE(store_id, seq_num)
+);
 `
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {

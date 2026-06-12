@@ -19,6 +19,9 @@ type AppService struct {
 	habitRepo    domain.PersonalHabitRepository
 	habitLogRepo domain.HabitLogRepository
 	aiRepo       domain.AIContextRepository
+	storeRepo    domain.StoreRepository
+	productRepo  domain.ProductRepository
+	orderRepo    domain.OrderRepository
 	groqClient   *groq.Client
 }
 
@@ -31,6 +34,9 @@ func NewAppService(
 	habitRepo domain.PersonalHabitRepository,
 	habitLogRepo domain.HabitLogRepository,
 	aiRepo domain.AIContextRepository,
+	storeRepo domain.StoreRepository,
+	productRepo domain.ProductRepository,
+	orderRepo domain.OrderRepository,
 	groqClient *groq.Client,
 ) *AppService {
 	return &AppService{
@@ -42,6 +48,9 @@ func NewAppService(
 		habitRepo:    habitRepo,
 		habitLogRepo: habitLogRepo,
 		aiRepo:       aiRepo,
+		storeRepo:    storeRepo,
+		productRepo:  productRepo,
+		orderRepo:    orderRepo,
 		groqClient:   groqClient,
 	}
 }
@@ -622,3 +631,291 @@ func CalculateStreak(logs []*domain.HabitLog, today time.Time) int {
 	return streak
 }
 
+// Business Stores, Products, and Orders Management
+func (s *AppService) GetOrCreateUserStore(ctx context.Context, tgUserID int64, storeName string) (*domain.Store, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	st, err := s.storeRepo.GetByNameAndUser(ctx, storeName, u.ID)
+	if err == nil {
+		return st, nil
+	}
+
+	st = &domain.Store{
+		UserID:    u.ID,
+		StoreName: storeName,
+	}
+	err = s.storeRepo.Create(ctx, st)
+	if err != nil {
+		return nil, err
+	}
+	return st, nil
+}
+
+func (s *AppService) GetUserStores(ctx context.Context, tgUserID int64) ([]*domain.Store, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+	return s.storeRepo.GetByUserID(ctx, u.ID)
+}
+
+func (s *AppService) AddProduct(ctx context.Context, tgUserID int64, storeID string, name string, price float64, stock int) (*domain.Product, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	p := &domain.Product{
+		StoreID: storeID,
+		Name:    name,
+		Price:   price,
+		Stock:   stock,
+	}
+	err = s.productRepo.Create(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *AppService) GetStoreProducts(ctx context.Context, tgUserID int64, storeID string) ([]*domain.Product, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	return s.productRepo.GetByStoreID(ctx, storeID)
+}
+
+func (s *AppService) DeleteProduct(ctx context.Context, tgUserID int64, storeID string, seqNum int) error {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+
+	if store.UserID != u.ID {
+		return domain.ErrUnauthorized
+	}
+
+	p, err := s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
+	if err != nil {
+		return err
+	}
+
+	return s.productRepo.Delete(ctx, p.ID)
+}
+
+func (s *AppService) CreateStoreOrder(ctx context.Context, tgUserID int64, storeID string, clientName string, clientPhone *string, productDetails string, totalCost float64, advancePayment float64, shippingAddress *string, shippingCost float64, status string) (*domain.Order, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	o := &domain.Order{
+		StoreID:         storeID,
+		ClientName:      clientName,
+		ClientPhone:     clientPhone,
+		ProductDetails:  productDetails,
+		TotalCost:       totalCost,
+		AdvancePayment:  advancePayment,
+		ShippingAddress: shippingAddress,
+		ShippingCost:    shippingCost,
+		Status:          status,
+	}
+	err = s.orderRepo.Create(ctx, o)
+	if err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func (s *AppService) GetStoreOrders(ctx context.Context, tgUserID int64, storeID string) ([]*domain.Order, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	return s.orderRepo.GetByStoreID(ctx, storeID)
+}
+
+func (s *AppService) GetPendingStoreOrders(ctx context.Context, tgUserID int64, storeID string) ([]*domain.Order, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	return s.orderRepo.GetPendingByStoreID(ctx, storeID)
+}
+
+func (s *AppService) UpdateOrderStatus(ctx context.Context, tgUserID int64, storeID string, seqNum int, status string) error {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+
+	if store.UserID != u.ID {
+		return domain.ErrUnauthorized
+	}
+
+	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
+	if err != nil {
+		return err
+	}
+
+	o.Status = status
+	return s.orderRepo.Update(ctx, o)
+}
+
+func (s *AppService) RecordOrderFinalPayment(ctx context.Context, tgUserID int64, storeID string, seqNum int) error {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+
+	if store.UserID != u.ID {
+		return domain.ErrUnauthorized
+	}
+
+	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
+	if err != nil {
+		return err
+	}
+
+	o.AdvancePayment = o.TotalCost
+	o.Status = "completed"
+	return s.orderRepo.Update(ctx, o)
+}
+
+func (s *AppService) DeleteStoreOrder(ctx context.Context, tgUserID int64, storeID string, seqNum int) error {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+
+	if store.UserID != u.ID {
+		return domain.ErrUnauthorized
+	}
+
+	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
+	if err != nil {
+		return err
+	}
+
+	return s.orderRepo.Delete(ctx, o.ID)
+}
+
+func (s *AppService) GetProductBySeqNum(ctx context.Context, tgUserID int64, storeID string, seqNum int) (*domain.Product, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+
+	return s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
+}
+
+func (s *AppService) DecreaseProductStock(ctx context.Context, tgUserID int64, storeID string, seqNum int, quantity int) error {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return err
+	}
+
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+
+	if store.UserID != u.ID {
+		return domain.ErrUnauthorized
+	}
+
+	p, err := s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
+	if err != nil {
+		return err
+	}
+
+	if p.Stock >= 0 {
+		if p.Stock < quantity {
+			return fmt.Errorf("stock insuficiente (disponible: %d)", p.Stock)
+		}
+		p.Stock -= quantity
+		return s.productRepo.Update(ctx, p)
+	}
+	return nil
+}

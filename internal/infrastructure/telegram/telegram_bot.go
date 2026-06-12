@@ -27,6 +27,19 @@ const (
 	StateAwaitingHabitName
 	StateAwaitingHabitDays
 	StateAwaitingHabitTime
+	StateAwaitingStoreName
+	StateAwaitingOrderClientName
+	StateAwaitingOrderClientPhone
+	StateAwaitingOrderProductDetails
+	StateAwaitingOrderTotalCost
+	StateAwaitingOrderAdvancePayment
+	StateAwaitingOrderShippingAddress
+	StateAwaitingOrderShippingCost
+	StateAwaitingProductName
+	StateAwaitingProductPrice
+	StateAwaitingProductStock
+	StateAwaitingOrderQuantity
+	StateAwaitingOrderSelectProduct
 )
 
 type UserState struct {
@@ -150,6 +163,8 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		case "crearhabito":
 			b.setState(userID, StateAwaitingHabitName, make(map[string]interface{}))
 			b.sendText(userID, "💪 Ingresa el nombre del hábito o meta (ej: Ir al Gimnasio, Postulaciones de Trabajo, Tomar 2L Agua):")
+		case "negocios", "tiendas", "ventas":
+			b.showBusinessPanel(ctx, userID)
 		case "ayuda":
 			b.sendHelp(userID)
 		default:
@@ -420,6 +435,245 @@ func (b *Bot) handleStateFlow(ctx context.Context, msg *tgbotapi.Message, user *
 		} else {
 			b.sendText(userID, fmt.Sprintf("✅ ¡Hábito Nro %d '%s' registrado para los días [%s] sin recordatorios!", h.SeqNum, habitName, days))
 		}
+
+	case StateAwaitingStoreName:
+		storeName := strings.TrimSpace(msg.Text)
+		if storeName == "" {
+			b.sendText(userID, "⚠️ El nombre no puede estar vacío. Reintenta:")
+			return
+		}
+		s, err := b.appService.GetOrCreateUserStore(ctx, userID, storeName)
+		if err != nil {
+			b.sendText(userID, "❌ Error al crear tienda: "+err.Error())
+			b.clearState(userID)
+			return
+		}
+		b.clearState(userID)
+		b.sendText(userID, fmt.Sprintf("✅ ¡Tienda/Negocio '%s' registrada con éxito! 🎉", s.StoreName))
+		b.showManageStorePanel(ctx, userID, s.ID)
+
+	case StateAwaitingProductName:
+		name := strings.TrimSpace(msg.Text)
+		if name == "" {
+			b.sendText(userID, "⚠️ El nombre del producto no puede estar vacío. Reintenta:")
+			return
+		}
+		state.Data["name"] = name
+		state.State = StateAwaitingProductPrice
+		b.setState(userID, StateAwaitingProductPrice, state.Data)
+		b.sendText(userID, "💵 Ingresa el precio de venta (ej: 45.90):")
+
+	case StateAwaitingProductPrice:
+		priceStr := strings.TrimSpace(msg.Text)
+		price, err := strconv.ParseFloat(priceStr, 64)
+		if err != nil || price <= 0 {
+			b.sendText(userID, "⚠️ Precio inválido. Debe ser un número mayor a 0. Reintenta:")
+			return
+		}
+		state.Data["price"] = price
+		state.State = StateAwaitingProductStock
+		b.setState(userID, StateAwaitingProductStock, state.Data)
+		b.sendText(userID, "📦 Ingresa el stock disponible (ej: 20, o escribe -1 si es ilimitado/bajo pedido):")
+
+	case StateAwaitingProductStock:
+		stockStr := strings.TrimSpace(msg.Text)
+		stock, err := strconv.Atoi(stockStr)
+		if err != nil {
+			b.sendText(userID, "⚠️ Stock inválido. Debe ser un número entero. Reintenta:")
+			return
+		}
+		name := state.Data["name"].(string)
+		price := state.Data["price"].(float64)
+		storeID := state.Data["store_id"].(string)
+
+		p, err := b.appService.AddProduct(ctx, userID, storeID, name, price, stock)
+		if err != nil {
+			b.sendText(userID, "❌ Error al agregar producto: "+err.Error())
+			b.clearState(userID)
+			return
+		}
+		b.clearState(userID)
+		b.sendText(userID, fmt.Sprintf("✅ ¡Producto '%s' (Nro %d) agregado con éxito!", p.Name, p.SeqNum))
+		b.showStoreCatalog(ctx, userID, storeID)
+
+	case StateAwaitingOrderSelectProduct:
+		b.sendText(userID, "⚠️ Por favor selecciona un producto de la lista o escribe 'cancelar':")
+
+	case StateAwaitingOrderQuantity:
+		qtyStr := strings.TrimSpace(msg.Text)
+		qty, err := strconv.Atoi(qtyStr)
+		if err != nil || qty <= 0 {
+			b.sendText(userID, "⚠️ Cantidad inválida. Debe ser un número entero mayor a 0. Reintenta:")
+			return
+		}
+		
+		stock := state.Data["product_stock"].(int)
+		if stock >= 0 && qty > stock {
+			b.sendText(userID, fmt.Sprintf("⚠️ Stock insuficiente. Solo hay %d disponibles. Reintenta:", stock))
+			return
+		}
+
+		state.Data["quantity"] = qty
+		state.State = StateAwaitingOrderClientName
+		b.setState(userID, StateAwaitingOrderClientName, state.Data)
+		b.sendText(userID, "👤 Ingresa el nombre del cliente (o escribe 'no' para venta rápida):")
+
+	case StateAwaitingOrderClientName:
+		clientName := strings.TrimSpace(msg.Text)
+		if clientName == "" {
+			b.sendText(userID, "⚠️ El nombre del cliente no puede estar vacío. Reintenta:")
+			return
+		}
+		if strings.ToLower(clientName) == "no" {
+			clientName = "Venta Rápida"
+		}
+		state.Data["client_name"] = clientName
+		state.State = StateAwaitingOrderClientPhone
+		b.setState(userID, StateAwaitingOrderClientPhone, state.Data)
+		b.sendText(userID, "📞 Ingresa el número de teléfono del cliente (o escribe 'no'):")
+
+	case StateAwaitingOrderClientPhone:
+		phoneInput := strings.TrimSpace(msg.Text)
+		var phone *string
+		if strings.ToLower(phoneInput) != "no" && phoneInput != "" {
+			phone = &phoneInput
+		}
+		state.Data["client_phone"] = phone
+
+		orderType := state.Data["order_type"].(string)
+		if orderType == "catalog" {
+			qty := state.Data["quantity"].(int)
+			price := state.Data["product_price"].(float64)
+			totalCost := price * float64(qty)
+			state.Data["total_cost"] = totalCost
+			state.Data["product_details"] = fmt.Sprintf("%dx %s", qty, state.Data["product_name"].(string))
+
+			state.State = StateAwaitingOrderAdvancePayment
+			b.setState(userID, StateAwaitingOrderAdvancePayment, state.Data)
+			b.sendText(userID, fmt.Sprintf("💰 El costo total es $%.2f.\nIngresa el adelanto o pago realizado (escribe 'completo' para pagar todo):", totalCost))
+		} else {
+			state.State = StateAwaitingOrderProductDetails
+			b.setState(userID, StateAwaitingOrderProductDetails, state.Data)
+			b.sendText(userID, "🛋️ Ingresa los detalles del pedido (ej: 2 cojines verdes y 1 mueble habitando home):")
+		}
+
+	case StateAwaitingOrderProductDetails:
+		details := strings.TrimSpace(msg.Text)
+		if details == "" {
+			b.sendText(userID, "⚠️ Los detalles no pueden estar vacíos. Reintenta:")
+			return
+		}
+		state.Data["product_details"] = details
+		state.State = StateAwaitingOrderTotalCost
+		b.setState(userID, StateAwaitingOrderTotalCost, state.Data)
+		b.sendText(userID, "💵 Ingresa el costo total del pedido (ej: 850.00):")
+
+	case StateAwaitingOrderTotalCost:
+		costStr := strings.TrimSpace(msg.Text)
+		totalCost, err := strconv.ParseFloat(costStr, 64)
+		if err != nil || totalCost <= 0 {
+			b.sendText(userID, "⚠️ Costo inválido. Debe ser un número mayor a 0. Reintenta:")
+			return
+		}
+		state.Data["total_cost"] = totalCost
+		state.State = StateAwaitingOrderAdvancePayment
+		b.setState(userID, StateAwaitingOrderAdvancePayment, state.Data)
+		b.sendText(userID, "💰 Ingresa el monto del adelanto pagado (ej: 300.00, o escribe '0'):")
+
+	case StateAwaitingOrderAdvancePayment:
+		advStr := strings.TrimSpace(msg.Text)
+		var advance float64
+		totalCost := state.Data["total_cost"].(float64)
+
+		if strings.ToLower(advStr) == "completo" {
+			advance = totalCost
+		} else {
+			var err error
+			advance, err = strconv.ParseFloat(advStr, 64)
+			if err != nil || advance < 0 {
+				b.sendText(userID, "⚠️ Adelanto inválido. Debe ser un número positivo. Reintenta:")
+				return
+			}
+		}
+		state.Data["advance_payment"] = advance
+		state.State = StateAwaitingOrderShippingAddress
+		b.setState(userID, StateAwaitingOrderShippingAddress, state.Data)
+		b.sendText(userID, "📍 Ingresa la dirección de envío (o escribe 'no' si se retira en tienda):")
+
+	case StateAwaitingOrderShippingAddress:
+		addrInput := strings.TrimSpace(msg.Text)
+		var address *string
+		if strings.ToLower(addrInput) != "no" && addrInput != "" {
+			address = &addrInput
+		}
+		state.Data["shipping_address"] = address
+		state.State = StateAwaitingOrderShippingCost
+		b.setState(userID, StateAwaitingOrderShippingCost, state.Data)
+		b.sendText(userID, "🚚 Ingresa el costo del envío (ej: 15.00, o escribe '0'):")
+
+	case StateAwaitingOrderShippingCost:
+		costStr := strings.TrimSpace(msg.Text)
+		shippingCost, err := strconv.ParseFloat(costStr, 64)
+		if err != nil || shippingCost < 0 {
+			b.sendText(userID, "⚠️ Costo de envío inválido. Debe ser un número positivo. Reintenta:")
+			return
+		}
+
+		storeID := state.Data["store_id"].(string)
+		clientName := state.Data["client_name"].(string)
+		clientPhone := state.Data["client_phone"].(*string)
+		productDetails := state.Data["product_details"].(string)
+		totalCost := state.Data["total_cost"].(float64)
+		advancePayment := state.Data["advance_payment"].(float64)
+		shippingAddress := state.Data["shipping_address"].(*string)
+
+		// Determine status
+		status := "advance_paid"
+		if advancePayment >= (totalCost + shippingCost) {
+			status = "completed"
+		} else if shippingAddress != nil {
+			status = "pending_shipment"
+		}
+
+		orderType := state.Data["order_type"].(string)
+		if orderType == "catalog" {
+			// Decrease product stock
+			productSeq := state.Data["product_seq"].(int)
+			qty := state.Data["quantity"].(int)
+			err := b.appService.DecreaseProductStock(ctx, userID, storeID, productSeq, qty)
+			if err != nil {
+				b.sendText(userID, "⚠️ Advertencia al reducir stock: "+err.Error())
+			}
+		}
+
+		o, err := b.appService.CreateStoreOrder(ctx, userID, storeID, clientName, clientPhone, productDetails, totalCost, advancePayment, shippingAddress, shippingCost, status)
+		if err != nil {
+			b.sendText(userID, "❌ Error al crear el pedido: "+err.Error())
+			b.clearState(userID)
+			return
+		}
+
+		b.clearState(userID)
+
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("✅ ¡Pedido Nro %d registrado con éxito!\n\n", o.SeqNum))
+		sb.WriteString(fmt.Sprintf("👤 *Cliente:* %s\n", o.ClientName))
+		if o.ClientPhone != nil {
+			sb.WriteString(fmt.Sprintf("📞 *Teléfono:* %s\n", *o.ClientPhone))
+		}
+		sb.WriteString(fmt.Sprintf("📦 *Detalles:* %s\n", o.ProductDetails))
+		sb.WriteString(fmt.Sprintf("💵 *Costo Total:* $%.2f\n", o.TotalCost))
+		sb.WriteString(fmt.Sprintf("💰 *Adelanto Pagado:* $%.2f\n", o.AdvancePayment))
+		pending := (o.TotalCost + o.ShippingCost) - o.AdvancePayment
+		sb.WriteString(fmt.Sprintf("⚠️ *Pendiente de Cobro:* $%.2f\n", pending))
+		if o.ShippingAddress != nil {
+			sb.WriteString(fmt.Sprintf("📍 *Dirección de Envío:* %s\n", *o.ShippingAddress))
+			sb.WriteString(fmt.Sprintf("🚚 *Costo de Envío:* $%.2f\n", o.ShippingCost))
+		}
+		sb.WriteString(fmt.Sprintf("🏷️ *Estado:* %s\n", o.Status))
+
+		b.sendText(userID, sb.String())
+		b.showStoreOrders(ctx, userID, storeID)
 	}
 }
 
@@ -623,6 +877,171 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, cb *tgbotapi.CallbackQuer
 		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, "🧹 *Crear Tarea - Paso 3:*\nIngresa la fecha de vencimiento en formato *DD/MM* (ej: 18/06) o escribe *no* para no definir fecha:")
 		editMsg.ParseMode = tgbotapi.ModeMarkdown
 		_, _ = b.api.Send(editMsg)
+
+	case "manageStore":
+		storeID := parts[1]
+		b.showManageStorePanel(ctx, userID, storeID)
+
+	case "newStore":
+		b.setState(userID, StateAwaitingStoreName, make(map[string]interface{}))
+		b.sendText(userID, "🏪 Ingresa el nombre de tu nuevo emprendimiento (ej. Habitando Home, Pineapple):")
+
+	case "storeCatalog":
+		storeID := parts[1]
+		b.showStoreCatalog(ctx, userID, storeID)
+
+	case "storeOrders":
+		storeID := parts[1]
+		b.showStoreOrders(ctx, userID, storeID)
+
+	case "storeNewProduct":
+		storeID := parts[1]
+		stateData := make(map[string]interface{})
+		stateData["store_id"] = storeID
+		b.setState(userID, StateAwaitingProductName, stateData)
+		b.sendText(userID, "📦 Ingresa el nombre del producto que deseas agregar al catálogo:")
+
+	case "storeNewOrder":
+		storeID := parts[1]
+		btnCustom := tgbotapi.NewInlineKeyboardButtonData("📝 Pedido Personalizado (Escribir detalles)", fmt.Sprintf("orderStartType_%s_custom", storeID))
+		btnCatalog := tgbotapi.NewInlineKeyboardButtonData("📦 Venta de Catálogo (Elegir producto)", fmt.Sprintf("orderStartType_%s_catalog", storeID))
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(btnCustom),
+			tgbotapi.NewInlineKeyboardRow(btnCatalog),
+		)
+		msg := tgbotapi.NewMessage(userID, "🛒 *Registrar Nueva Venta/Pedido:*\n¿Qué tipo de registro deseas realizar?")
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		msg.ReplyMarkup = kb
+		_, _ = b.api.Send(msg)
+
+	case "orderStartType":
+		if len(parts) < 3 {
+			return
+		}
+		storeID := parts[1]
+		orderType := parts[2]
+
+		stateData := make(map[string]interface{})
+		stateData["store_id"] = storeID
+		stateData["order_type"] = orderType
+
+		if orderType == "catalog" {
+			products, err := b.appService.GetStoreProducts(ctx, userID, storeID)
+			if err != nil || len(products) == 0 {
+				b.sendText(userID, "⚠️ No tienes productos en el catálogo. Primero agrega productos desde el menú de la tienda.")
+				return
+			}
+			var rows [][]tgbotapi.InlineKeyboardButton
+			for _, p := range products {
+				stockInfo := "Ilimitado"
+				if p.Stock >= 0 {
+					stockInfo = fmt.Sprintf("Stock: %d", p.Stock)
+				}
+				btn := tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%s ($%.2f - %s)", p.Name, p.Price, stockInfo), fmt.Sprintf("selectProdForOrder_%s_%d", storeID, p.SeqNum))
+				rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+			}
+			kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+			b.setState(userID, StateAwaitingOrderSelectProduct, stateData)
+			
+			msg := tgbotapi.NewMessage(userID, "📦 *Venta de Catálogo - Paso 1:*\nSelecciona el producto a vender:")
+			msg.ParseMode = tgbotapi.ModeMarkdown
+			msg.ReplyMarkup = kb
+			_, _ = b.api.Send(msg)
+		} else {
+			stateData["product_id"] = ""
+			b.setState(userID, StateAwaitingOrderClientName, stateData)
+			b.sendText(userID, "👤 *Pedido Personalizado - Paso 1:*\nIngresa el nombre del cliente (ej. Carlos Pérez):")
+		}
+
+	case "selectProdForOrder":
+		if len(parts) < 3 {
+			return
+		}
+		storeID := parts[1]
+		seqNum, _ := strconv.Atoi(parts[2])
+
+		p, err := b.appService.GetProductBySeqNum(ctx, userID, storeID, seqNum)
+		if err != nil {
+			b.sendText(userID, "❌ Error al seleccionar producto: "+err.Error())
+			return
+		}
+
+		b.statesMu.RLock()
+		state, hasState := b.states[userID]
+		b.statesMu.RUnlock()
+
+		if !hasState || state.State != StateAwaitingOrderSelectProduct {
+			b.sendText(userID, "⚠️ Sesión expirada.")
+			return
+		}
+
+		state.Data["product_id"] = p.ID
+		state.Data["product_name"] = p.Name
+		state.Data["product_price"] = p.Price
+		state.Data["product_stock"] = p.Stock
+		state.Data["product_seq"] = p.SeqNum
+
+		state.State = StateAwaitingOrderQuantity
+		b.setState(userID, StateAwaitingOrderQuantity, state.Data)
+
+		b.sendText(userID, fmt.Sprintf("🔢 ¿Cuántas unidades de *%s* deseas vender? (Stock actual: %d):", p.Name, p.Stock))
+
+	case "deleteProduct":
+		if len(parts) < 3 {
+			return
+		}
+		storeID := parts[1]
+		seqNum, _ := strconv.Atoi(parts[2])
+		err := b.appService.DeleteProduct(ctx, userID, storeID, seqNum)
+		if err != nil {
+			b.sendText(userID, "❌ Error al eliminar producto: "+err.Error())
+		} else {
+			b.sendText(userID, "🗑️ Producto eliminado del catálogo.")
+			b.showStoreCatalog(ctx, userID, storeID)
+		}
+
+	case "deleteOrder":
+		if len(parts) < 3 {
+			return
+		}
+		storeID := parts[1]
+		seqNum, _ := strconv.Atoi(parts[2])
+		err := b.appService.DeleteStoreOrder(ctx, userID, storeID, seqNum)
+		if err != nil {
+			b.sendText(userID, "❌ Error al eliminar pedido: "+err.Error())
+		} else {
+			b.sendText(userID, "🗑️ Registro de pedido/venta eliminado.")
+			b.showStoreOrders(ctx, userID, storeID)
+		}
+
+	case "orderFinalPayment":
+		if len(parts) < 3 {
+			return
+		}
+		storeID := parts[1]
+		seqNum, _ := strconv.Atoi(parts[2])
+		err := b.appService.RecordOrderFinalPayment(ctx, userID, storeID, seqNum)
+		if err != nil {
+			b.sendText(userID, "❌ Error al registrar pago del saldo: "+err.Error())
+		} else {
+			b.sendText(userID, "✅ ¡Saldo pagado en su totalidad! Pedido completado.")
+			b.showStoreOrders(ctx, userID, storeID)
+		}
+
+	case "orderUpdateStatus":
+		if len(parts) < 4 {
+			return
+		}
+		storeID := parts[1]
+		seqNum, _ := strconv.Atoi(parts[2])
+		status := parts[3]
+		err := b.appService.UpdateOrderStatus(ctx, userID, storeID, seqNum, status)
+		if err != nil {
+			b.sendText(userID, "❌ Error al actualizar estado: "+err.Error())
+		} else {
+			b.sendText(userID, fmt.Sprintf("✅ Estado del pedido Nro %d actualizado a: %s", seqNum, status))
+			b.showStoreOrders(ctx, userID, storeID)
+		}
 	}
 }
 
@@ -860,10 +1279,11 @@ func (b *Bot) sendMainMenu(userID int64, user *domain.User) {
 		text += "\n\n⚠️ Actualmente no estás en ningún grupo de roomies. Elige una opción:"
 		btnCreate := tgbotapi.NewKeyboardButton("/creargrupo")
 		btnJoin := tgbotapi.NewKeyboardButton("/unirse")
+		btnStores := tgbotapi.NewKeyboardButton("/negocios")
 		btnHelp := tgbotapi.NewKeyboardButton("/ayuda")
 		kb := tgbotapi.NewReplyKeyboard(
 			tgbotapi.NewKeyboardButtonRow(btnCreate, btnJoin),
-			tgbotapi.NewKeyboardButtonRow(btnHelp),
+			tgbotapi.NewKeyboardButtonRow(btnStores, btnHelp),
 		)
 		msg := tgbotapi.NewMessage(userID, text)
 		msg.ParseMode = tgbotapi.ModeMarkdown
@@ -880,11 +1300,12 @@ func (b *Bot) sendMainMenu(userID int64, user *domain.User) {
 		btnPayments := tgbotapi.NewKeyboardButton("/pagospendientes")
 		btnKitchen := tgbotapi.NewKeyboardButton("/cocina")
 		btnHabits := tgbotapi.NewKeyboardButton("/habitos")
+		btnStores := tgbotapi.NewKeyboardButton("/negocios")
 		btnHelp := tgbotapi.NewKeyboardButton("/ayuda")
 
 		kb := tgbotapi.NewReplyKeyboard(
 			tgbotapi.NewKeyboardButtonRow(btnTasks, btnPayments, btnKitchen),
-			tgbotapi.NewKeyboardButtonRow(btnHabits, btnHelp),
+			tgbotapi.NewKeyboardButtonRow(btnHabits, btnStores, btnHelp),
 		)
 		msg := tgbotapi.NewMessage(userID, text)
 		msg.ParseMode = tgbotapi.ModeMarkdown
@@ -916,6 +1337,11 @@ func (b *Bot) sendHelp(userID int64) {
 🏋️‍♂️ *Disciplina y Hábitos:*
 /habitos - Ver tus hábitos personales, rachas (permite completarlos y eliminarlos)
 /crearhabito - Crear un nuevo hábito con alertas horarias
+
+💼 *Negocios y Emprendimientos:*
+/negocios - Administrar tiendas, inventarios y pedidos (ej: Habitando Home o Pineapple)
+/tiendas - Ver tus tiendas de negocio registradas
+/ventas - Ver reportes de ventas y pedidos
 
 🤖 *Groq AI:*
 Simplemente envíame un mensaje de texto normal para charlar sobre tus tareas, finanzas o solicitar recordatorios y planes.
@@ -952,4 +1378,199 @@ func (b *Bot) clearState(userID int64) {
 
 func (b *Bot) SendNotification(tgUserID int64, text string) {
 	b.sendText(tgUserID, text)
+}
+
+func (b *Bot) showBusinessPanel(ctx context.Context, userID int64) {
+	stores, err := b.appService.GetUserStores(ctx, userID)
+	if err != nil {
+		b.sendText(userID, "⚠️ Error al obtener tus tiendas: "+err.Error())
+		return
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, s := range stores {
+		btn := tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("🏪 %s", s.StoreName), fmt.Sprintf("manageStore_%s", s.ID))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+	}
+	btnNew := tgbotapi.NewInlineKeyboardButtonData("➕ Crear Nueva Tienda/Negocio", "newStore_0")
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(btnNew))
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	msg := tgbotapi.NewMessage(userID, "💼 *Gestión de Negocios & Emprendimientos:*\nAquí puedes administrar el inventario y pedidos de tus tiendas (ej: Habitando Home o Pineapple). Selecciona una opción:")
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ReplyMarkup = kb
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) showManageStorePanel(ctx context.Context, userID int64, storeID string) {
+	stores, err := b.appService.GetUserStores(ctx, userID)
+	if err != nil {
+		b.sendText(userID, "⚠️ Error: "+err.Error())
+		return
+	}
+	var storeName string
+	for _, s := range stores {
+		if s.ID == storeID {
+			storeName = s.StoreName
+			break
+		}
+	}
+	if storeName == "" {
+		b.sendText(userID, "⚠️ Tienda no encontrada.")
+		return
+	}
+
+	btnCatalog := tgbotapi.NewInlineKeyboardButtonData("📦 Catálogo / Inventario", fmt.Sprintf("storeCatalog_%s", storeID))
+	btnOrders := tgbotapi.NewInlineKeyboardButtonData("📋 Pedidos y Ventas", fmt.Sprintf("storeOrders_%s", storeID))
+	btnNewOrder := tgbotapi.NewInlineKeyboardButtonData("➕ Registrar Venta / Pedido", fmt.Sprintf("storeNewOrder_%s", storeID))
+	btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tiendas", "manageStore_back")
+
+	kb := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(btnCatalog, btnOrders),
+		tgbotapi.NewInlineKeyboardRow(btnNewOrder),
+		tgbotapi.NewInlineKeyboardRow(btnBack),
+	)
+
+	msg := tgbotapi.NewMessage(userID, fmt.Sprintf("🏪 *Panel de Control - %s:*\n¿Qué deseas gestionar hoy?", storeName))
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ReplyMarkup = kb
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) showStoreCatalog(ctx context.Context, userID int64, storeID string) {
+	products, err := b.appService.GetStoreProducts(ctx, userID, storeID)
+	if err != nil {
+		b.sendText(userID, "⚠️ Error al cargar catálogo: "+err.Error())
+		return
+	}
+
+	var sb strings.Builder
+	sb.WriteString("📦 *Catálogo de Productos / Inventario:*\n\n")
+
+	if len(products) == 0 {
+		sb.WriteString("🤷‍♂️ Tu catálogo está vacío.")
+	} else {
+		for _, p := range products {
+			stockInfo := "Ilimitado/Bajo pedido"
+			if p.Stock >= 0 {
+				stockInfo = fmt.Sprintf("%d unidades", p.Stock)
+			}
+			sb.WriteString(fmt.Sprintf("🔹 *%d. %s*\nPrecio: $%.2f | Stock: %s\n\n", p.SeqNum, p.Name, p.Price, stockInfo))
+		}
+	}
+
+	btnNewProduct := tgbotapi.NewInlineKeyboardButtonData("➕ Agregar Producto", fmt.Sprintf("storeNewProduct_%s", storeID))
+	btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tienda", fmt.Sprintf("manageStore_%s", storeID))
+	
+	var rows [][]tgbotapi.InlineKeyboardButton
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(btnNewProduct))
+	
+	if len(products) > 0 {
+		for _, p := range products {
+			btnDel := tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("🗑️ Borrar %d", p.SeqNum), fmt.Sprintf("deleteProduct_%s_%d", storeID, p.SeqNum))
+			rows = append(rows, tgbotapi.NewInlineKeyboardRow(btnDel))
+		}
+	}
+	
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(btnBack))
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	msg := tgbotapi.NewMessage(userID, sb.String())
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ReplyMarkup = kb
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) showStoreOrders(ctx context.Context, userID int64, storeID string) {
+	orders, err := b.appService.GetStoreOrders(ctx, userID, storeID)
+	if err != nil {
+		b.sendText(userID, "⚠️ Error al cargar pedidos: "+err.Error())
+		return
+	}
+
+	if len(orders) == 0 {
+		btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tienda", fmt.Sprintf("manageStore_%s", storeID))
+		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btnBack))
+		
+		msg := tgbotapi.NewMessage(userID, "📋 No hay pedidos ni ventas registrados en esta tienda.")
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		msg.ReplyMarkup = kb
+		_, _ = b.api.Send(msg)
+		return
+	}
+
+	b.sendText(userID, "📋 *Registro de Pedidos y Ventas:*")
+
+	for _, o := range orders {
+		var sb strings.Builder
+		sb.WriteString(fmt.Sprintf("🛍️ *Pedido Nro %d: %s*\n", o.SeqNum, o.ClientName))
+		if o.ClientPhone != nil {
+			sb.WriteString(fmt.Sprintf("📞 *Teléfono:* %s\n", *o.ClientPhone))
+		}
+		sb.WriteString(fmt.Sprintf("📦 *Detalles:* %s\n", o.ProductDetails))
+		sb.WriteString(fmt.Sprintf("💵 *Costo Total:* $%.2f\n", o.TotalCost))
+		sb.WriteString(fmt.Sprintf("💰 *Adelanto Pagado:* $%.2f\n", o.AdvancePayment))
+		pending := (o.TotalCost + o.ShippingCost) - o.AdvancePayment
+		if pending > 0 {
+			sb.WriteString(fmt.Sprintf("⚠️ *Pendiente de Cobro:* $%.2f\n", pending))
+		} else {
+			sb.WriteString("✅ *Pagado por completo*\n")
+		}
+		if o.ShippingAddress != nil {
+			sb.WriteString(fmt.Sprintf("📍 *Dirección Envío:* %s\n", *o.ShippingAddress))
+			sb.WriteString(fmt.Sprintf("🚚 *Costo Envío:* $%.2f\n", o.ShippingCost))
+		}
+		
+		statusSp := map[string]string{
+			"advance_paid":     "Adelanto Pagado 💰",
+			"pending_shipment": "Pendiente de Envío 📦",
+			"shipped":          "Enviado 🚚",
+			"delivered":        "Entregado 🎁",
+			"completed":        "Completado ✅",
+		}
+		statusLabel := o.Status
+		if label, ok := statusSp[o.Status]; ok {
+			statusLabel = label
+		}
+		sb.WriteString(fmt.Sprintf("🏷️ *Estado:* %s\n", statusLabel))
+
+		var buttons []tgbotapi.InlineKeyboardButton
+		if o.Status != "completed" && pending > 0 {
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("💵 Registrar Pago Saldo", fmt.Sprintf("orderFinalPayment_%s_%d", storeID, o.SeqNum)))
+		}
+		
+		if o.Status == "advance_paid" && o.ShippingAddress != nil {
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("🚚 Marcar Listo Envío", fmt.Sprintf("orderUpdateStatus_%s_%d_pending_shipment", storeID, o.SeqNum)))
+		} else if o.Status == "pending_shipment" {
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("🚚 Marcar Enviado", fmt.Sprintf("orderUpdateStatus_%s_%d_shipped", storeID, o.SeqNum)))
+		} else if o.Status == "shipped" {
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("🎁 Marcar Entregado", fmt.Sprintf("orderUpdateStatus_%s_%d_delivered", storeID, o.SeqNum)))
+		} else if o.Status == "delivered" && pending <= 0 {
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("✅ Completar", fmt.Sprintf("orderUpdateStatus_%s_%d_completed", storeID, o.SeqNum)))
+		}
+
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("🗑️ Borrar", fmt.Sprintf("deleteOrder_%s_%d", storeID, o.SeqNum)))
+
+		var rows [][]tgbotapi.InlineKeyboardButton
+		for i := 0; i < len(buttons); i += 2 {
+			end := i + 2
+			if end > len(buttons) {
+				end = len(buttons)
+			}
+			rows = append(rows, buttons[i:end])
+		}
+
+		kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+		msg := tgbotapi.NewMessage(userID, sb.String())
+		msg.ParseMode = tgbotapi.ModeMarkdown
+		msg.ReplyMarkup = kb
+		_, _ = b.api.Send(msg)
+	}
+
+	btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tienda", fmt.Sprintf("manageStore_%s", storeID))
+	kbBack := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btnBack))
+	msgBack := tgbotapi.NewMessage(userID, "🔙 Usa el botón de abajo para regresar al panel de control de la tienda:")
+	msgBack.ReplyMarkup = kbBack
+	_, _ = b.api.Send(msgBack)
 }

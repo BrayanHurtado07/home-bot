@@ -69,6 +69,9 @@ func main() {
 	habitRepo := db.NewPersonalHabitRepository(dbPool)
 	habitLogRepo := db.NewHabitLogRepository(dbPool)
 	aiRepo := db.NewAIContextRepository(dbPool)
+	storeRepo := db.NewStoreRepository(dbPool)
+	productRepo := db.NewProductRepository(dbPool)
+	orderRepo := db.NewOrderRepository(dbPool)
 
 	// 5. Initialize Groq API Client
 	groqClient := groq.NewClient(cfg.GroqAPIKey)
@@ -83,6 +86,9 @@ func main() {
 		habitRepo,
 		habitLogRepo,
 		aiRepo,
+		storeRepo,
+		productRepo,
+		orderRepo,
 		groqClient,
 	)
 

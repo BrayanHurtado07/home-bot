@@ -552,3 +552,253 @@ func (r *HabitLogRepository) GetLogsByHabitID(ctx context.Context, habitID strin
 	}
 	return logs, nil
 }
+
+// StoreRepository implementation
+type StoreRepository struct {
+	pool *pgxpool.Pool
+}
+
+func NewStoreRepository(pool *pgxpool.Pool) *StoreRepository {
+	return &StoreRepository{pool: pool}
+}
+
+func (r *StoreRepository) Create(ctx context.Context, s *domain.Store) error {
+	query := `INSERT INTO business_stores (user_id, store_name) VALUES ($1, $2) RETURNING id, created_at`
+	err := r.pool.QueryRow(ctx, query, s.UserID, s.StoreName).Scan(&s.ID, &s.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("error creating business store: %w", err)
+	}
+	return nil
+}
+
+func (r *StoreRepository) GetByID(ctx context.Context, id string) (*domain.Store, error) {
+	query := `SELECT id, user_id, store_name, created_at FROM business_stores WHERE id = $1`
+	var s domain.Store
+	err := r.pool.QueryRow(ctx, query, id).Scan(&s.ID, &s.UserID, &s.StoreName, &s.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("tienda no encontrada")
+		}
+		return nil, fmt.Errorf("error getting store by id: %w", err)
+	}
+	return &s, nil
+}
+
+func (r *StoreRepository) GetByUserID(ctx context.Context, userID string) ([]*domain.Store, error) {
+	query := `SELECT id, user_id, store_name, created_at FROM business_stores WHERE user_id = $1 ORDER BY created_at DESC`
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("error querying stores by user id: %w", err)
+	}
+	defer rows.Close()
+
+	var stores []*domain.Store
+	for rows.Next() {
+		var s domain.Store
+		if err := rows.Scan(&s.ID, &s.UserID, &s.StoreName, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		stores = append(stores, &s)
+	}
+	return stores, nil
+}
+
+func (r *StoreRepository) GetByNameAndUser(ctx context.Context, name string, userID string) (*domain.Store, error) {
+	query := `SELECT id, user_id, store_name, created_at FROM business_stores WHERE LOWER(store_name) = LOWER($1) AND user_id = $2`
+	var s domain.Store
+	err := r.pool.QueryRow(ctx, query, name, userID).Scan(&s.ID, &s.UserID, &s.StoreName, &s.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("tienda no encontrada")
+		}
+		return nil, fmt.Errorf("error getting store by name and user: %w", err)
+	}
+	return &s, nil
+}
+
+// ProductRepository implementation
+type ProductRepository struct {
+	pool *pgxpool.Pool
+}
+
+func NewProductRepository(pool *pgxpool.Pool) *ProductRepository {
+	return &ProductRepository{pool: pool}
+}
+
+func (r *ProductRepository) Create(ctx context.Context, p *domain.Product) error {
+	query := `INSERT INTO store_products (store_id, name, price, stock, seq_num) 
+	          VALUES ($1, $2, $3, $4, (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM store_products WHERE store_id = $1)) 
+	          RETURNING id, seq_num, created_at`
+	err := r.pool.QueryRow(ctx, query, p.StoreID, p.Name, p.Price, p.Stock).Scan(&p.ID, &p.SeqNum, &p.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("error creating product: %w", err)
+	}
+	return nil
+}
+
+func (r *ProductRepository) GetByID(ctx context.Context, id string) (*domain.Product, error) {
+	query := `SELECT id, store_id, name, price, stock, seq_num, created_at FROM store_products WHERE id = $1`
+	var p domain.Product
+	err := r.pool.QueryRow(ctx, query, id).Scan(&p.ID, &p.StoreID, &p.Name, &p.Price, &p.Stock, &p.SeqNum, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("producto no encontrado")
+		}
+		return nil, fmt.Errorf("error getting product by id: %w", err)
+	}
+	return &p, nil
+}
+
+func (r *ProductRepository) GetBySeqNum(ctx context.Context, storeID string, seqNum int) (*domain.Product, error) {
+	query := `SELECT id, store_id, name, price, stock, seq_num, created_at 
+	          FROM store_products WHERE store_id = $1 AND seq_num = $2`
+	var p domain.Product
+	err := r.pool.QueryRow(ctx, query, storeID, seqNum).Scan(&p.ID, &p.StoreID, &p.Name, &p.Price, &p.Stock, &p.SeqNum, &p.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("producto no encontrado por seq_num")
+		}
+		return nil, fmt.Errorf("error getting product by seq_num: %w", err)
+	}
+	return &p, nil
+}
+
+func (r *ProductRepository) GetByStoreID(ctx context.Context, storeID string) ([]*domain.Product, error) {
+	query := `SELECT id, store_id, name, price, stock, seq_num, created_at FROM store_products WHERE store_id = $1 ORDER BY seq_num ASC`
+	rows, err := r.pool.Query(ctx, query, storeID)
+	if err != nil {
+		return nil, fmt.Errorf("error querying products by store: %w", err)
+	}
+	defer rows.Close()
+
+	var products []*domain.Product
+	for rows.Next() {
+		var p domain.Product
+		if err := rows.Scan(&p.ID, &p.StoreID, &p.Name, &p.Price, &p.Stock, &p.SeqNum, &p.CreatedAt); err != nil {
+			return nil, err
+		}
+		products = append(products, &p)
+	}
+	return products, nil
+}
+
+func (r *ProductRepository) Update(ctx context.Context, p *domain.Product) error {
+	query := `UPDATE store_products SET name = $1, price = $2, stock = $3 WHERE id = $4`
+	_, err := r.pool.Exec(ctx, query, p.Name, p.Price, p.Stock, p.ID)
+	if err != nil {
+		return fmt.Errorf("error updating product: %w", err)
+	}
+	return nil
+}
+
+func (r *ProductRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM store_products WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("error deleting product: %w", err)
+	}
+	return nil
+}
+
+// OrderRepository implementation
+type OrderRepository struct {
+	pool *pgxpool.Pool
+}
+
+func NewOrderRepository(pool *pgxpool.Pool) *OrderRepository {
+	return &OrderRepository{pool: pool}
+}
+
+func (r *OrderRepository) Create(ctx context.Context, o *domain.Order) error {
+	query := `INSERT INTO store_orders (store_id, client_name, client_phone, product_details, total_cost, advance_payment, shipping_address, shipping_cost, status, seq_num) 
+	          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, (SELECT COALESCE(MAX(seq_num), 0) + 1 FROM store_orders WHERE store_id = $1)) 
+	          RETURNING id, seq_num, created_at`
+	err := r.pool.QueryRow(ctx, query, o.StoreID, o.ClientName, o.ClientPhone, o.ProductDetails, o.TotalCost, o.AdvancePayment, o.ShippingAddress, o.ShippingCost, o.Status).Scan(&o.ID, &o.SeqNum, &o.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("error creating store order: %w", err)
+	}
+	return nil
+}
+
+func (r *OrderRepository) GetByID(ctx context.Context, id string) (*domain.Order, error) {
+	query := `SELECT id, store_id, client_name, client_phone, product_details, total_cost, advance_payment, shipping_address, shipping_cost, status, seq_num, created_at FROM store_orders WHERE id = $1`
+	var o domain.Order
+	err := r.pool.QueryRow(ctx, query, id).Scan(&o.ID, &o.StoreID, &o.ClientName, &o.ClientPhone, &o.ProductDetails, &o.TotalCost, &o.AdvancePayment, &o.ShippingAddress, &o.ShippingCost, &o.Status, &o.SeqNum, &o.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("pedido no encontrado")
+		}
+		return nil, fmt.Errorf("error getting order by id: %w", err)
+	}
+	return &o, nil
+}
+
+func (r *OrderRepository) GetBySeqNum(ctx context.Context, storeID string, seqNum int) (*domain.Order, error) {
+	query := `SELECT id, store_id, client_name, client_phone, product_details, total_cost, advance_payment, shipping_address, shipping_cost, status, seq_num, created_at 
+	          FROM store_orders WHERE store_id = $1 AND seq_num = $2`
+	var o domain.Order
+	err := r.pool.QueryRow(ctx, query, storeID, seqNum).Scan(&o.ID, &o.StoreID, &o.ClientName, &o.ClientPhone, &o.ProductDetails, &o.TotalCost, &o.AdvancePayment, &o.ShippingAddress, &o.ShippingCost, &o.Status, &o.SeqNum, &o.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("pedido no encontrado por seq_num")
+		}
+		return nil, fmt.Errorf("error getting order by seq_num: %w", err)
+	}
+	return &o, nil
+}
+
+func (r *OrderRepository) GetByStoreID(ctx context.Context, storeID string) ([]*domain.Order, error) {
+	query := `SELECT id, store_id, client_name, client_phone, product_details, total_cost, advance_payment, shipping_address, shipping_cost, status, seq_num, created_at FROM store_orders WHERE store_id = $1 ORDER BY seq_num DESC`
+	rows, err := r.pool.Query(ctx, query, storeID)
+	if err != nil {
+		return nil, fmt.Errorf("error querying orders by store: %w", err)
+	}
+	defer rows.Close()
+
+	var orders []*domain.Order
+	for rows.Next() {
+		var o domain.Order
+		if err := rows.Scan(&o.ID, &o.StoreID, &o.ClientName, &o.ClientPhone, &o.ProductDetails, &o.TotalCost, &o.AdvancePayment, &o.ShippingAddress, &o.ShippingCost, &o.Status, &o.SeqNum, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		orders = append(orders, &o)
+	}
+	return orders, nil
+}
+
+func (r *OrderRepository) GetPendingByStoreID(ctx context.Context, storeID string) ([]*domain.Order, error) {
+	query := `SELECT id, store_id, client_name, client_phone, product_details, total_cost, advance_payment, shipping_address, shipping_cost, status, seq_num, created_at FROM store_orders WHERE store_id = $1 AND status != 'completed' ORDER BY seq_num DESC`
+	rows, err := r.pool.Query(ctx, query, storeID)
+	if err != nil {
+		return nil, fmt.Errorf("error querying pending orders: %w", err)
+	}
+	defer rows.Close()
+
+	var orders []*domain.Order
+	for rows.Next() {
+		var o domain.Order
+		if err := rows.Scan(&o.ID, &o.StoreID, &o.ClientName, &o.ClientPhone, &o.ProductDetails, &o.TotalCost, &o.AdvancePayment, &o.ShippingAddress, &o.ShippingCost, &o.Status, &o.SeqNum, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		orders = append(orders, &o)
+	}
+	return orders, nil
+}
+
+func (r *OrderRepository) Update(ctx context.Context, o *domain.Order) error {
+	query := `UPDATE store_orders SET client_name = $1, client_phone = $2, product_details = $3, total_cost = $4, advance_payment = $5, shipping_address = $6, shipping_cost = $7, status = $8 WHERE id = $9`
+	_, err := r.pool.Exec(ctx, query, o.ClientName, o.ClientPhone, o.ProductDetails, o.TotalCost, o.AdvancePayment, o.ShippingAddress, o.ShippingCost, o.Status, o.ID)
+	if err != nil {
+		return fmt.Errorf("error updating order: %w", err)
+	}
+	return nil
+}
+
+func (r *OrderRepository) Delete(ctx context.Context, id string) error {
+	query := `DELETE FROM store_orders WHERE id = $1`
+	_, err := r.pool.Exec(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("error deleting order: %w", err)
+	}
+	return nil
+}
