@@ -751,7 +751,108 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, cb *tgbotapi.CallbackQuer
 			b.sendText(userID, "🎉 ¡Felicidades por completar tu hábito de hoy!")
 			b.listHabits(ctx, userID)
 		}
+
+	case "cookShowSchedule":
+		text, err := b.buildKitchenScheduleText(ctx, userID)
+		if err != nil {
+			b.sendText(userID, "⚠️ "+err.Error())
+			return
+		}
+		btnAssign := tgbotapi.NewInlineKeyboardButtonData("🍳 Asignar Mi Turno", "cookAssignStart_0")
+		kb := tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnAssign})
+
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, text)
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		editMsg.ReplyMarkup = &kb
+		_, _ = b.api.Send(editMsg)
+
+	case "cookAssignStart":
+		days := []string{"Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"}
+		var rows [][]tgbotapi.InlineKeyboardButton
+		var currentRow []tgbotapi.InlineKeyboardButton
+		for i, d := range days {
+			dayNum := i + 1
+			btn := tgbotapi.NewInlineKeyboardButtonData(d, fmt.Sprintf("cookSelectDay_%d", dayNum))
+			currentRow = append(currentRow, btn)
+			if len(currentRow) == 3 || i == len(days)-1 {
+				rows = append(rows, currentRow)
+				currentRow = []tgbotapi.InlineKeyboardButton{}
+			}
+		}
+		btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver al Rol", "cookShowSchedule_0")
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(btnBack))
+		kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, "🍳 *Asignar Cocina - Paso 1:*\nSelecciona el día de la semana:")
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		editMsg.ReplyMarkup = &kb
+		_, _ = b.api.Send(editMsg)
+
+	case "cookSelectDay":
+		if len(parts) < 2 {
+			return
+		}
+		dayNum := parts[1]
+		
+		btnBreakfast := tgbotapi.NewInlineKeyboardButtonData("🥞 Desayuno", fmt.Sprintf("cookSelectMeal_%s_breakfast", dayNum))
+		btnLunch := tgbotapi.NewInlineKeyboardButtonData("🍛 Almuerzo", fmt.Sprintf("cookSelectMeal_%s_lunch", dayNum))
+		btnDinner := tgbotapi.NewInlineKeyboardButtonData("🍕 Cena", fmt.Sprintf("cookSelectMeal_%s_dinner", dayNum))
+		btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Atrás", "cookAssignStart_0")
+		
+		kb := tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(btnBreakfast),
+			tgbotapi.NewInlineKeyboardRow(btnLunch),
+			tgbotapi.NewInlineKeyboardRow(btnDinner),
+			tgbotapi.NewInlineKeyboardRow(btnBack),
+		)
+
+		daysSp := []string{"", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"}
+		dIdx, _ := strconv.Atoi(dayNum)
+		dayName := daysSp[dIdx]
+
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, fmt.Sprintf("🍳 *Asignar Cocina - Paso 2:*\nHas elegido el *%s*.\nSelecciona la comida:", dayName))
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		editMsg.ReplyMarkup = &kb
+		_, _ = b.api.Send(editMsg)
+
+	case "cookSelectMeal":
+		if len(parts) < 3 {
+			return
+		}
+		dayNum, _ := strconv.Atoi(parts[1])
+		mealType := parts[2]
+
+		err := b.appService.SetMealChef(ctx, userID, dayNum, mealType, userID)
+		if err != nil {
+			b.sendText(userID, "❌ Error al asignarte como cocinero: "+err.Error())
+			return
+		}
+
+		text, err := b.buildKitchenScheduleText(ctx, userID)
+		if err != nil {
+			b.sendText(userID, "⚠️ "+err.Error())
+			return
+		}
+
+		daysSp := []string{"", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"}
+		mealNamesSp := map[string]string{
+			"breakfast": "Desayuno 🥞",
+			"lunch":     "Almuerzo 🍛",
+			"dinner":    "Cena 🍕",
+		}
+
+		confirmation := fmt.Sprintf("✅ ¡Asignado con éxito el *%s* para %s!\n\n", daysSp[dayNum], mealNamesSp[mealType])
+		
+		btnAssign := tgbotapi.NewInlineKeyboardButtonData("🍳 Asignar Otro Turno", "cookAssignStart_0")
+		kb := tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnAssign})
+
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, confirmation + text)
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		editMsg.ReplyMarkup = &kb
+		_, _ = b.api.Send(editMsg)
+
 	case "setChef":
+
 		if len(parts) < 3 {
 			return
 		}
@@ -1164,10 +1265,33 @@ func (b *Bot) listPayments(ctx context.Context, userID int64, user *domain.User)
 }
 
 func (b *Bot) showKitchenSchedule(ctx context.Context, userID int64, user *domain.User) {
-	meals, err := b.appService.GetMealSchedule(ctx, userID)
+	if user.TenantID == nil {
+		b.sendText(userID, "⚠️ Primero debes crear o unirte a un grupo con /creargrupo o /unirse.")
+		return
+	}
+
+	text, err := b.buildKitchenScheduleText(ctx, userID)
 	if err != nil {
 		b.sendText(userID, "⚠️ "+err.Error())
 		return
+	}
+
+	btnAssign := tgbotapi.NewInlineKeyboardButtonData("🍳 Asignar Mi Turno", "cookAssignStart_0")
+	kb := tgbotapi.NewInlineKeyboardMarkup([]tgbotapi.InlineKeyboardButton{btnAssign})
+
+	msg := tgbotapi.NewMessage(userID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ReplyMarkup = kb
+	_, err = b.api.Send(msg)
+	if err != nil {
+		log.Printf("Error al enviar el rol de cocina: %v", err)
+	}
+}
+
+func (b *Bot) buildKitchenScheduleText(ctx context.Context, userID int64) (string, error) {
+	meals, err := b.appService.GetMealSchedule(ctx, userID)
+	if err != nil {
+		return "", err
 	}
 
 	roomies, _ := b.appService.GetUsersInGroup(ctx, userID)
@@ -1194,42 +1318,26 @@ func (b *Bot) showKitchenSchedule(ctx context.Context, userID int64, user *domai
 		}
 	}
 
-	b.sendText(userID, "🍳 *Rol de Cocina Compartido:*")
+	var sb strings.Builder
+	sb.WriteString("🍳 *Rol de Cocina Compartido:*\n\n")
 
 	for d := 1; d <= 7; d++ {
-		var dayText strings.Builder
-		dayText.WriteString(fmt.Sprintf("📅 *%s:*\n", days[d]))
-
+		sb.WriteString(fmt.Sprintf("📅 *%s:*\n", days[d]))
 		for _, mt := range mealTypes {
 			key := fmt.Sprintf("%d_%s", d, mt)
 			chef, hasChef := chefMatrix[key]
-
 			if hasChef {
-				dayText.WriteString(fmt.Sprintf("  • %s: Cocina *%s*\n", mealNamesSp[mt], chef))
+				sb.WriteString(fmt.Sprintf("  • %s: Cocina *%s*\n", mealNamesSp[mt], chef))
 			} else {
-				dayText.WriteString(fmt.Sprintf("  • %s: *Sin asignar* /cocinar\n", mealNamesSp[mt]))
+				sb.WriteString(fmt.Sprintf("  • %s: _Sin asignar_\n", mealNamesSp[mt]))
 			}
 		}
-
-		var buttons []tgbotapi.InlineKeyboardButton
-		for _, mt := range mealTypes {
-			key := fmt.Sprintf("%d_%s", d, mt)
-			if _, ok := chefMatrix[key]; !ok {
-				buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
-					fmt.Sprintf("Yo %s", mealNamesSp[mt]),
-					fmt.Sprintf("setChef_%d_%s", d, mt),
-				))
-			}
-		}
-
-		msg := tgbotapi.NewMessage(userID, dayText.String())
-		msg.ParseMode = tgbotapi.ModeMarkdown
-		if len(buttons) > 0 {
-			msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(buttons)
-		}
-		_, _ = b.api.Send(msg)
+		sb.WriteString("\n")
 	}
+
+	return sb.String(), nil
 }
+
 
 func (b *Bot) listHabits(ctx context.Context, userID int64) {
 	habitsWithStreak, err := b.appService.GetPersonalHabitsWithStreak(ctx, userID)
