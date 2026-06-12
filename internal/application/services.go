@@ -704,7 +704,80 @@ func (s *AppService) GetUserStores(ctx context.Context, tgUserID int64) ([]*doma
 	if err != nil {
 		return nil, err
 	}
-	return s.storeRepo.GetByUserID(ctx, u.ID)
+	owned, err := s.storeRepo.GetByUserID(ctx, u.ID)
+	if err != nil {
+		return nil, err
+	}
+	shared, err := s.storeRepo.GetSharedByUserID(ctx, u.ID)
+	if err != nil {
+		return owned, nil
+	}
+	return append(owned, shared...), nil
+}
+
+func (s *AppService) verifyStoreAccess(ctx context.Context, userID string, storeID string) error {
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return err
+	}
+	if store.UserID == userID {
+		return nil
+	}
+	isCollab, err := s.storeRepo.IsCollaborator(ctx, storeID, userID)
+	if err == nil && isCollab {
+		return nil
+	}
+	return domain.ErrUnauthorized
+}
+
+func (s *AppService) JoinStoreByUUID(ctx context.Context, tgUserID int64, storeID string) (*domain.Store, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, fmt.Errorf("tienda no encontrada con el código ingresado")
+	}
+	if store.UserID == u.ID {
+		return store, nil
+	}
+	collab := &domain.StoreCollaborator{
+		StoreID: store.ID,
+		UserID:  u.ID,
+		Role:    "editor",
+	}
+	err = s.storeRepo.AddCollaborator(ctx, collab)
+	if err != nil {
+		return nil, err
+	}
+	return store, nil
+}
+
+func (s *AppService) GetStoreCollaborators(ctx context.Context, tgUserID int64, storeID string) ([]*domain.User, error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return nil, err
+	}
+	store, err := s.storeRepo.GetByID(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	if store.UserID != u.ID {
+		return nil, domain.ErrUnauthorized
+	}
+	collabs, err := s.storeRepo.GetCollaborators(ctx, storeID)
+	if err != nil {
+		return nil, err
+	}
+	var users []*domain.User
+	for _, c := range collabs {
+		usr, err := s.userRepo.GetByID(ctx, c.UserID)
+		if err == nil {
+			users = append(users, usr)
+		}
+	}
+	return users, nil
 }
 
 func (s *AppService) AddProduct(ctx context.Context, tgUserID int64, storeID string, name string, price float64, stock int) (*domain.Product, error) {
@@ -713,13 +786,8 @@ func (s *AppService) AddProduct(ctx context.Context, tgUserID int64, storeID str
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	p := &domain.Product{
@@ -741,13 +809,8 @@ func (s *AppService) GetStoreProducts(ctx context.Context, tgUserID int64, store
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	return s.productRepo.GetByStoreID(ctx, storeID)
@@ -759,13 +822,8 @@ func (s *AppService) DeleteProduct(ctx context.Context, tgUserID int64, storeID 
 		return err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return err
-	}
-
-	if store.UserID != u.ID {
-		return domain.ErrUnauthorized
 	}
 
 	p, err := s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -782,13 +840,8 @@ func (s *AppService) CreateStoreOrder(ctx context.Context, tgUserID int64, store
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	o := &domain.Order{
@@ -815,13 +868,8 @@ func (s *AppService) GetStoreOrders(ctx context.Context, tgUserID int64, storeID
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	return s.orderRepo.GetByStoreID(ctx, storeID)
@@ -833,13 +881,8 @@ func (s *AppService) GetPendingStoreOrders(ctx context.Context, tgUserID int64, 
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	return s.orderRepo.GetPendingByStoreID(ctx, storeID)
@@ -851,13 +894,8 @@ func (s *AppService) UpdateOrderStatus(ctx context.Context, tgUserID int64, stor
 		return err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return err
-	}
-
-	if store.UserID != u.ID {
-		return domain.ErrUnauthorized
 	}
 
 	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -875,13 +913,8 @@ func (s *AppService) RecordOrderFinalPayment(ctx context.Context, tgUserID int64
 		return err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return err
-	}
-
-	if store.UserID != u.ID {
-		return domain.ErrUnauthorized
 	}
 
 	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -900,13 +933,8 @@ func (s *AppService) DeleteStoreOrder(ctx context.Context, tgUserID int64, store
 		return err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return err
-	}
-
-	if store.UserID != u.ID {
-		return domain.ErrUnauthorized
 	}
 
 	o, err := s.orderRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -923,13 +951,8 @@ func (s *AppService) GetProductBySeqNum(ctx context.Context, tgUserID int64, sto
 		return nil, err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return nil, err
-	}
-
-	if store.UserID != u.ID {
-		return nil, domain.ErrUnauthorized
 	}
 
 	return s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -941,13 +964,8 @@ func (s *AppService) DecreaseProductStock(ctx context.Context, tgUserID int64, s
 		return err
 	}
 
-	store, err := s.storeRepo.GetByID(ctx, storeID)
-	if err != nil {
+	if err := s.verifyStoreAccess(ctx, u.ID, storeID); err != nil {
 		return err
-	}
-
-	if store.UserID != u.ID {
-		return domain.ErrUnauthorized
 	}
 
 	p, err := s.productRepo.GetBySeqNum(ctx, storeID, seqNum)
@@ -964,3 +982,50 @@ func (s *AppService) DecreaseProductStock(ctx context.Context, tgUserID int64, s
 	}
 	return nil
 }
+
+func (s *AppService) AssignPaymentToUser(ctx context.Context, tgAdminID int64, targetTelegramID int64, amount float64) (*domain.Payment, error) {
+	admin, err := s.userRepo.GetByTelegramID(ctx, tgAdminID)
+	if err != nil {
+		return nil, err
+	}
+	if admin.Role != "admin" {
+		return nil, domain.ErrUnauthorized
+	}
+	if admin.TenantID == nil {
+		return nil, fmt.Errorf("no perteneces a ningún grupo")
+	}
+
+	target, err := s.userRepo.GetByTelegramID(ctx, targetTelegramID)
+	if err != nil {
+		return nil, fmt.Errorf("el roomie no está registrado")
+	}
+	if target.TenantID == nil || *target.TenantID != *admin.TenantID {
+		return nil, fmt.Errorf("el roomie no pertenece a tu grupo")
+	}
+
+	p := &domain.Payment{
+		TenantID:    *admin.TenantID,
+		UserID:      target.ID,
+		Amount:      amount,
+		Status:      "pending",
+		BillingDate: time.Now(),
+	}
+	err = s.paymentRepo.Create(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (s *AppService) GetTaskStats(ctx context.Context, tgUserID int64) (total int, completed int, err error) {
+	u, err := s.userRepo.GetByTelegramID(ctx, tgUserID)
+	if err != nil {
+		return 0, 0, err
+	}
+	if u.TenantID == nil {
+		return 0, 0, fmt.Errorf("no perteneces a ningún grupo")
+	}
+	return s.taskRepo.GetStats(ctx, *u.TenantID)
+}
+
+

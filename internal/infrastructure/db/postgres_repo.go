@@ -316,6 +316,15 @@ func (r *HouseTaskRepository) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+func (r *HouseTaskRepository) GetStats(ctx context.Context, tenantID string) (total int, completed int, err error) {
+	query := `SELECT COUNT(*), COUNT(*) FILTER (WHERE is_done = TRUE) FROM house_tasks WHERE tenant_id = $1`
+	err = r.pool.QueryRow(ctx, query, tenantID).Scan(&total, &completed)
+	if err != nil {
+		return 0, 0, fmt.Errorf("error getting task stats: %w", err)
+	}
+	return total, completed, nil
+}
+
 // MealScheduleRepository implementation
 type MealScheduleRepository struct {
 	pool *pgxpool.Pool
@@ -615,6 +624,78 @@ func (r *StoreRepository) GetByNameAndUser(ctx context.Context, name string, use
 	}
 	return &s, nil
 }
+
+func (r *StoreRepository) AddCollaborator(ctx context.Context, c *domain.StoreCollaborator) error {
+	query := `INSERT INTO store_collaborators (store_id, user_id, role) VALUES ($1, $2, $3)
+	          ON CONFLICT (store_id, user_id) DO UPDATE SET role = EXCLUDED.role`
+	_, err := r.pool.Exec(ctx, query, c.StoreID, c.UserID, c.Role)
+	if err != nil {
+		return fmt.Errorf("error adding collaborator: %w", err)
+	}
+	return nil
+}
+
+func (r *StoreRepository) GetCollaborators(ctx context.Context, storeID string) ([]*domain.StoreCollaborator, error) {
+	query := `SELECT store_id, user_id, role, created_at FROM store_collaborators WHERE store_id = $1`
+	rows, err := r.pool.Query(ctx, query, storeID)
+	if err != nil {
+		return nil, fmt.Errorf("error getting collaborators: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*domain.StoreCollaborator
+	for rows.Next() {
+		var c domain.StoreCollaborator
+		if err := rows.Scan(&c.StoreID, &c.UserID, &c.Role, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &c)
+	}
+	return list, nil
+}
+
+func (r *StoreRepository) DeleteCollaborator(ctx context.Context, storeID string, userID string) error {
+	query := `DELETE FROM store_collaborators WHERE store_id = $1 AND user_id = $2`
+	_, err := r.pool.Exec(ctx, query, storeID, userID)
+	if err != nil {
+		return fmt.Errorf("error deleting collaborator: %w", err)
+	}
+	return nil
+}
+
+func (r *StoreRepository) IsCollaborator(ctx context.Context, storeID string, userID string) (bool, error) {
+	query := `SELECT EXISTS(SELECT 1 FROM store_collaborators WHERE store_id = $1 AND user_id = $2)`
+	var exists bool
+	err := r.pool.QueryRow(ctx, query, storeID, userID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("error checking collaborator status: %w", err)
+	}
+	return exists, nil
+}
+
+func (r *StoreRepository) GetSharedByUserID(ctx context.Context, userID string) ([]*domain.Store, error) {
+	query := `SELECT s.id, s.user_id, s.store_name, s.created_at 
+	          FROM business_stores s
+	          JOIN store_collaborators c ON s.id = c.store_id
+	          WHERE c.user_id = $1
+	          ORDER BY s.store_name ASC`
+	rows, err := r.pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("error querying shared stores: %w", err)
+	}
+	defer rows.Close()
+
+	var stores []*domain.Store
+	for rows.Next() {
+		var s domain.Store
+		if err := rows.Scan(&s.ID, &s.UserID, &s.StoreName, &s.CreatedAt); err != nil {
+			return nil, err
+		}
+		stores = append(stores, &s)
+	}
+	return stores, nil
+}
+
 
 // ProductRepository implementation
 type ProductRepository struct {

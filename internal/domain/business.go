@@ -37,11 +37,23 @@ type Order struct {
 	CreatedAt       time.Time
 }
 
+type StoreCollaborator struct {
+	StoreID   string
+	UserID    string
+	Role      string
+	CreatedAt time.Time
+}
+
 type StoreRepository interface {
 	Create(ctx context.Context, s *Store) error
 	GetByID(ctx context.Context, id string) (*Store, error)
 	GetByUserID(ctx context.Context, userID string) ([]*Store, error)
 	GetByNameAndUser(ctx context.Context, name string, userID string) (*Store, error)
+	AddCollaborator(ctx context.Context, c *StoreCollaborator) error
+	GetCollaborators(ctx context.Context, storeID string) ([]*StoreCollaborator, error)
+	DeleteCollaborator(ctx context.Context, storeID string, userID string) error
+	IsCollaborator(ctx context.Context, storeID string, userID string) (bool, error)
+	GetSharedByUserID(ctx context.Context, userID string) ([]*Store, error)
 }
 
 type ProductRepository interface {

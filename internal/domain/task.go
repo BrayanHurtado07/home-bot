@@ -24,4 +24,5 @@ type HouseTaskRepository interface {
 	GetPendingByTenantID(ctx context.Context, tenantID string) ([]*HouseTask, error)
 	GetPendingByUserID(ctx context.Context, userID string) ([]*HouseTask, error)
 	Delete(ctx context.Context, id string) error
+	GetStats(ctx context.Context, tenantID string) (total int, completed int, err error)
 }

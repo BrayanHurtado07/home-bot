@@ -122,7 +122,19 @@ CREATE TABLE IF NOT EXISTS store_orders (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uniq_store_order_seq UNIQUE(store_id, seq_num)
 );
+
+CREATE TABLE IF NOT EXISTS store_collaborators (
+    store_id UUID NOT NULL REFERENCES business_stores(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role VARCHAR(20) NOT NULL DEFAULT 'editor',
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (store_id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_store_products_store ON store_products(store_id);
+CREATE INDEX IF NOT EXISTS idx_store_orders_store ON store_orders(store_id);
 `
+
 
 func RunMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	log.Println("Ejecutando migraciones de base de datos...")

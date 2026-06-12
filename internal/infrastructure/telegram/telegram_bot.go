@@ -40,6 +40,10 @@ const (
 	StateAwaitingProductStock
 	StateAwaitingOrderQuantity
 	StateAwaitingOrderSelectProduct
+	StateAwaitingJoinStoreUUID
+	StateAwaitingAssignPaymentTarget
+	StateAwaitingAssignPaymentAmount
+	StateAwaitingAssignPaymentDesc
 )
 
 type UserState struct {
@@ -69,6 +73,28 @@ func NewBot(token string, appService *application.AppService) (*Bot, error) {
 
 func (b *Bot) Start(ctx context.Context) {
 	log.Printf("Bot autorizado como %s", b.api.Self.UserName)
+
+	// Configure auto-complete commands menu in Telegram
+	cmdConfig := tgbotapi.NewSetMyCommands(
+		tgbotapi.BotCommand{Command: "start", Description: "Iniciar el bot y ver menú principal"},
+		tgbotapi.BotCommand{Command: "negocios", Description: "Ver y administrar tus tiendas y ventas"},
+		tgbotapi.BotCommand{Command: "unirstienda", Description: "Unirse como colaborador a una tienda existente"},
+		tgbotapi.BotCommand{Command: "dashboard", Description: "Ver resumen administrativo del hogar (Admin)"},
+		tgbotapi.BotCommand{Command: "asignarpago", Description: "Asignar un cobro/pago a un roomie (Admin)"},
+		tgbotapi.BotCommand{Command: "tareas", Description: "Listar tareas de limpieza pendientes"},
+		tgbotapi.BotCommand{Command: "creartarea", Description: "Crear una tarea para el hogar"},
+		tgbotapi.BotCommand{Command: "pagar", Description: "Registrar comprobante de pago de alquiler/servicio"},
+		tgbotapi.BotCommand{Command: "pagospendientes", Description: "Ver pagos pendientes por validar"},
+		tgbotapi.BotCommand{Command: "cocina", Description: "Ver o registrarse en turnos de cocina de la semana"},
+		tgbotapi.BotCommand{Command: "asignarcocina", Description: "Asignar turnos de cocina (Admin)"},
+		tgbotapi.BotCommand{Command: "habitos", Description: "Ver tus hábitos y metas personales"},
+		tgbotapi.BotCommand{Command: "crearhabito", Description: "Crear un nuevo hábito con alertas"},
+		tgbotapi.BotCommand{Command: "roomies", Description: "Listar integrantes de tu departamento"},
+		tgbotapi.BotCommand{Command: "ayuda", Description: "Ver comandos y atajos rápidos"},
+	)
+	if _, err := b.api.Request(cmdConfig); err != nil {
+		log.Printf("Advertencia: No se pudo configurar SetMyCommands: %v", err)
+	}
 
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -165,6 +191,22 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			b.sendText(userID, "💪 Ingresa el nombre del hábito o meta (ej: Ir al Gimnasio, Postulaciones de Trabajo, Tomar 2L Agua):")
 		case "negocios", "tiendas", "ventas":
 			b.showBusinessPanel(ctx, userID)
+		case "unirstienda":
+			args := strings.TrimSpace(msg.CommandArguments())
+			if args == "" {
+				b.setState(userID, StateAwaitingJoinStoreUUID, nil)
+				b.sendText(userID, "🔑 Ingresa el ID único (UUID) de la tienda a la que deseas unirte como colaborador:")
+			} else {
+				b.joinStore(ctx, userID, args)
+			}
+		case "dashboard", "resumen":
+			b.showDashboard(ctx, userID, user)
+		case "asignarpago":
+			if user.Role != "admin" {
+				b.sendText(userID, "⚠️ Solo los administradores pueden asignar cobros/pagos.")
+				return
+			}
+			b.startPaymentAssignment(ctx, userID, user)
 		case "ayuda":
 			b.sendHelp(userID)
 		default:
@@ -674,6 +716,42 @@ func (b *Bot) handleStateFlow(ctx context.Context, msg *tgbotapi.Message, user *
 
 		b.sendText(userID, sb.String())
 		b.showStoreOrders(ctx, userID, storeID)
+
+	case StateAwaitingJoinStoreUUID:
+		storeUUID := strings.TrimSpace(msg.Text)
+		if storeUUID == "" {
+			b.sendText(userID, "⚠️ El ID de la tienda no puede estar vacío. Reintenta:")
+			return
+		}
+		b.joinStore(ctx, userID, storeUUID)
+
+	case StateAwaitingAssignPaymentTarget:
+		b.sendText(userID, "⚠️ Por favor, selecciona un roomie usando los botones en pantalla o escribe *cancelar* para salir.")
+
+	case StateAwaitingAssignPaymentAmount:
+		amountStr := strings.TrimSpace(msg.Text)
+		amount, err := strconv.ParseFloat(amountStr, 64)
+		if err != nil || amount <= 0 {
+			b.sendText(userID, "⚠️ Monto inválido. Debe ser un número mayor a 0. Reintenta:")
+			return
+		}
+		
+		targetTelegramID := state.Data["target_telegram_id"].(int64)
+		p, err := b.appService.AssignPaymentToUser(ctx, userID, targetTelegramID, amount)
+		if err != nil {
+			b.sendText(userID, "❌ Error al asignar el pago: "+err.Error())
+			b.clearState(userID)
+			return
+		}
+		b.clearState(userID)
+		
+		b.sendText(userID, fmt.Sprintf("✅ Pago Nro %d por un monto de $%.2f asignado exitosamente al roomie.", p.SeqNum, p.Amount))
+		
+		// Notify the target user
+		_, _ = b.appService.RegisterUser(ctx, targetTelegramID, "")
+		b.sendText(targetTelegramID, fmt.Sprintf(`🔔 *Nuevo Cobro Asignado:*
+El administrador te ha asignado un cobro de *$%.2f* (Pago Nro %d).
+Usa /pagar para subir el comprobante.`, amount, p.SeqNum))
 	}
 }
 
@@ -1165,6 +1243,46 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, cb *tgbotapi.CallbackQuer
 			b.sendText(userID, fmt.Sprintf("✅ Estado del pedido Nro %d actualizado a: %s", seqNum, status))
 			b.showStoreOrders(ctx, userID, storeID)
 		}
+	case "assignPayUser":
+		if len(parts) < 2 {
+			return
+		}
+		targetTelegramID, _ := strconv.ParseInt(parts[1], 10, 64)
+		stateData := make(map[string]interface{})
+		stateData["target_telegram_id"] = targetTelegramID
+		b.setState(userID, StateAwaitingAssignPaymentAmount, stateData)
+		
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, "💵 *Asignar Pago/Cobro - Paso 2:*\nIngresa el monto a cobrar (ej. 50.00 o 120):")
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		_, _ = b.api.Send(editMsg)
+	case "storeShare":
+		if len(parts) < 2 {
+			return
+		}
+		storeID := parts[1]
+		stores, err := b.appService.GetUserStores(ctx, userID)
+		if err != nil {
+			b.sendText(userID, "⚠️ Error: "+err.Error())
+			return
+		}
+		var storeName string
+		for _, s := range stores {
+			if s.ID == storeID {
+				storeName = s.StoreName
+				break
+			}
+		}
+		if storeName == "" {
+			b.sendText(userID, "⚠️ Tienda no encontrada.")
+			return
+		}
+		msgText := fmt.Sprintf("👥 *Compartir acceso a %s*\n\nPara compartir este emprendimiento con un socio, pídele que envíe el siguiente comando en su Telegram:\n\n`/unirstienda %s`\n\nUna vez que lo haga, podrá ver la tienda y co-administrar productos y pedidos.", storeName, storeID)
+		btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tienda", fmt.Sprintf("manageStore_%s", storeID))
+		kb := tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(btnBack))
+		editMsg := tgbotapi.NewEditMessageText(userID, cb.Message.MessageID, msgText)
+		editMsg.ParseMode = tgbotapi.ModeMarkdown
+		editMsg.ReplyMarkup = &kb
+		_, _ = b.api.Send(editMsg)
 	}
 }
 
@@ -1398,22 +1516,22 @@ func (b *Bot) listHabits(ctx context.Context, userID int64) {
 
 // Menu layout helpers
 func (b *Bot) sendWelcome(userID int64, user *domain.User) {
-	welcome := `👋 ¡Hola, %s! Bienvenido al Asistente de Gestión del Hogar y Disciplina.
+	welcome := `Hola, %s. Bienvenido al Asistente de Gestión del Hogar y Disciplina.
 
-Este bot te ayudará a ti y a tus roomies a coordinar tareas, pagos de alquiler y turnos de cocina, además de ayudarte con tu disciplina personal (gimnasio, comidas y metas de empleo).
+Este bot te ayuda a coordinar tareas, pagos y turnos de cocina con tus roomies, además de gestionar hábitos personales y las ventas o pedidos de tus emprendimientos.
 
-🤖 Puedes chatear conmigo libremente en cualquier momento para pedir resúmenes de tareas, consejos de productividad, o informarme algo.
+Puedes chatear conmigo en cualquier momento para pedir resúmenes de tareas, finanzas o resolver dudas.
 
-Para empezar, selecciona una opción del menú o escribe un comando.`
+Selecciona una opción del menú o escribe un comando.`
 
 	b.sendText(userID, fmt.Sprintf(welcome, user.Name))
 	b.sendMainMenu(userID, user)
 }
 
 func (b *Bot) sendMainMenu(userID int64, user *domain.User) {
-	text := "📌 *Menú Principal:*"
+	text := "*Menú Principal:*"
 	if user.TenantID == nil {
-		text += "\n\n⚠️ Actualmente no estás en ningún grupo de roomies. Elige una opción:"
+		text += "\n\nActualmente no estás en ningún grupo de roomies. Elige una opción:"
 		btnCreate := tgbotapi.NewKeyboardButton("/creargrupo")
 		btnJoin := tgbotapi.NewKeyboardButton("/unirse")
 		btnStores := tgbotapi.NewKeyboardButton("/negocios")
@@ -1432,7 +1550,7 @@ func (b *Bot) sendMainMenu(userID int64, user *domain.User) {
 		if err == nil {
 			groupName = group.GroupName
 		}
-		text += fmt.Sprintf("\n\n🏠 *Grupo:* %s\n🔑 *Código para Roomies:* `%s`\n👤 *Rol:* %s", groupName, *user.TenantID, user.Role)
+		text += fmt.Sprintf("\n\n*Grupo:* %s\n*Código para Roomies:* `%s`\n*Rol:* %s", groupName, *user.TenantID, user.Role)
 		btnTasks := tgbotapi.NewKeyboardButton("/tareas")
 		btnPayments := tgbotapi.NewKeyboardButton("/pagospendientes")
 		btnKitchen := tgbotapi.NewKeyboardButton("/cocina")
@@ -1452,38 +1570,40 @@ func (b *Bot) sendMainMenu(userID int64, user *domain.User) {
 }
 
 func (b *Bot) sendHelp(userID int64) {
-	helpText := `📖 *Comandos Disponibles:*
+	helpText := `*Comandos Disponibles*
 
-🏠 *Grupo y Roomies:*
-/creargrupo - Crea un nuevo grupo de roomies
+*Grupo y Roomies*
+/creargrupo - Crea un nuevo grupo de convivencia
 /unirse - Únete a un grupo existente usando su UUID
-/roomies - Listar miembros de tu grupo (También /miembros)
+/roomies - Listar integrantes del departamento
+/dashboard - Ver resumen del hogar (Solo Admin)
 
-🧹 *Tareas de Limpieza:*
-/tareas - Listar tareas pendientes (permite completarlas y eliminarlas)
-/creartarea - Crear una nueva tarea interactiva (asignando roomie y vencimiento)
+*Tareas de Limpieza*
+/tareas - Ver y gestionar tareas de limpieza
+/creartarea - Crear una nueva tarea interactiva
 
-💰 *Pagos y Servicios:*
+*Pagos y Servicios*
 /pagar - Subir un comprobante de pago
 /pagospendientes - Ver pagos pendientes por validar
+/asignarpago - Asignar un cobro a un roomie (Solo Admin)
 
-🍳 *Cocina:*
-/cocina - Ver y organizar los turnos de cocina de la semana
-/asignarcocina - Asignar turnos de cocina a roomies específicos (Solo Admin)
+*Cocina*
+/cocina - Ver y organizar los turnos de cocina semanales
+/asignarcocina - Asignar turnos de cocina (Solo Admin)
 
-🏋️‍♂️ *Disciplina y Hábitos:*
-/habitos - Ver tus hábitos personales, rachas (permite completarlos y eliminarlos)
-/crearhabito - Crear un nuevo hábito con alertas horarias
+*Disciplina y Hábitos*
+/habitos - Ver y registrar tus hábitos personales
+/crearhabito - Crear un nuevo hábito con alertas
 
-💼 *Negocios y Emprendimientos:*
-/negocios - Administrar tiendas, inventarios y pedidos (ej: Habitando Home o Pineapple)
-/tiendas - Ver tus tiendas de negocio registradas
-/ventas - Ver reportes de ventas y pedidos
+*Negocios y Emprendimientos*
+/negocios - Ver y administrar tus tiendas y ventas (Habitando Home, Pineapple, etc.)
+/unirstienda - Unirte como colaborador a una tienda existente
 
-🤖 *Groq AI:*
-Simplemente envíame un mensaje de texto normal para charlar sobre tus tareas, finanzas o solicitar recordatorios y planes.
+*Groq AI*
+Chatea con el asistente para planes, resúmenes o recordatorios escribiendo un mensaje normal.
 
-❌ Escribe *cancelar* en cualquier momento para salir del asistente de un comando.`
+*Cancelar*
+Escribe *cancelar* en cualquier momento para salir de un flujo interactivo.`
 
 	b.sendText(userID, helpText)
 }
@@ -1561,11 +1681,12 @@ func (b *Bot) showManageStorePanel(ctx context.Context, userID int64, storeID st
 	btnCatalog := tgbotapi.NewInlineKeyboardButtonData("📦 Catálogo / Inventario", fmt.Sprintf("storeCatalog_%s", storeID))
 	btnOrders := tgbotapi.NewInlineKeyboardButtonData("📋 Pedidos y Ventas", fmt.Sprintf("storeOrders_%s", storeID))
 	btnNewOrder := tgbotapi.NewInlineKeyboardButtonData("➕ Registrar Venta / Pedido", fmt.Sprintf("storeNewOrder_%s", storeID))
+	btnShare := tgbotapi.NewInlineKeyboardButtonData("👥 Compartir Acceso", fmt.Sprintf("storeShare_%s", storeID))
 	btnBack := tgbotapi.NewInlineKeyboardButtonData("🔙 Volver a Tiendas", "manageStore_back")
 
 	kb := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(btnCatalog, btnOrders),
-		tgbotapi.NewInlineKeyboardRow(btnNewOrder),
+		tgbotapi.NewInlineKeyboardRow(btnNewOrder, btnShare),
 		tgbotapi.NewInlineKeyboardRow(btnBack),
 	)
 
@@ -1710,4 +1831,151 @@ func (b *Bot) showStoreOrders(ctx context.Context, userID int64, storeID string)
 	msgBack := tgbotapi.NewMessage(userID, "🔙 Usa el botón de abajo para regresar al panel de control de la tienda:")
 	msgBack.ReplyMarkup = kbBack
 	_, _ = b.api.Send(msgBack)
+}
+
+func (b *Bot) joinStore(ctx context.Context, userID int64, storeUUID string) {
+	storeUUID = strings.TrimSpace(storeUUID)
+	store, err := b.appService.JoinStoreByUUID(ctx, userID, storeUUID)
+	if err != nil {
+		b.sendText(userID, "❌ Error al unirte a la tienda: "+err.Error())
+		b.clearState(userID)
+		return
+	}
+	b.clearState(userID)
+	b.sendText(userID, fmt.Sprintf("✅ Te has unido exitosamente como colaborador de la tienda: %s", store.StoreName))
+	b.showManageStorePanel(ctx, userID, store.ID)
+}
+
+func (b *Bot) startPaymentAssignment(ctx context.Context, userID int64, user *domain.User) {
+	if user.TenantID == nil {
+		b.sendText(userID, "⚠️ Primero debes crear o unirte a un grupo con /creargrupo o /unirse.")
+		return
+	}
+	if user.Role != "admin" {
+		b.sendText(userID, "⚠️ Solo los administradores pueden asignar cobros/pagos.")
+		return
+	}
+
+	roomies, err := b.appService.GetUsersInGroup(ctx, userID)
+	if err != nil {
+		b.sendText(userID, "❌ Error al obtener los miembros del grupo: "+err.Error())
+		return
+	}
+
+	if len(roomies) == 0 {
+		b.sendText(userID, "🤷‍♂️ No hay roomies registrados en tu grupo para asignarles cobros.")
+		return
+	}
+
+	var buttons []tgbotapi.InlineKeyboardButton
+	for _, r := range roomies {
+		btn := tgbotapi.NewInlineKeyboardButtonData(r.Name, fmt.Sprintf("assignPayUser_%d", r.TelegramID))
+		buttons = append(buttons, btn)
+	}
+
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, btn := range buttons {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(btn))
+	}
+	kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
+
+	b.setState(userID, StateAwaitingAssignPaymentTarget, nil)
+
+	msg := tgbotapi.NewMessage(userID, "💵 *Asignar Pago/Cobro - Paso 1:*\nSelecciona al roomie al que deseas asignarle el cobro:")
+	msg.ParseMode = tgbotapi.ModeMarkdown
+	msg.ReplyMarkup = kb
+	_, _ = b.api.Send(msg)
+}
+
+func (b *Bot) showDashboard(ctx context.Context, userID int64, user *domain.User) {
+	if user.TenantID == nil {
+		b.sendText(userID, "⚠️ Primero debes crear o unirte a un grupo con /creargrupo o /unirse.")
+		return
+	}
+
+	totalTasks, completedTasks, err := b.appService.GetTaskStats(ctx, userID)
+	if err != nil {
+		log.Printf("Error getting task stats for dashboard: %v", err)
+	}
+
+	pctDone := 100
+	if totalTasks > 0 {
+		pctDone = (completedTasks * 100) / totalTasks
+	}
+
+	filled := pctDone / 10
+	bar := ""
+	for i := 0; i < 10; i++ {
+		if i < filled {
+			bar += "■"
+		} else {
+			bar += "□"
+		}
+	}
+
+	pendingPayments, err := b.appService.GetPendingPayments(ctx, userID)
+	if err != nil {
+		log.Printf("Error getting pending payments for dashboard: %v", err)
+	}
+	pendingPaymentsCount := len(pendingPayments)
+
+	meals, err := b.appService.GetMealSchedule(ctx, userID)
+	if err != nil {
+		log.Printf("Error getting meals for dashboard: %v", err)
+	}
+
+	roomies, _ := b.appService.GetUsersInGroup(ctx, userID)
+	userMap := make(map[string]string)
+	for _, r := range roomies {
+		userMap[r.ID] = r.Name
+	}
+
+	daysSp := []string{"", "Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"}
+	loc, err := time.LoadLocation("America/Bogota")
+	if err != nil {
+		loc = time.UTC
+	}
+	nowLocal := time.Now().In(loc)
+	weekday := int(nowLocal.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+
+	var breakfastChef, lunchChef, dinnerChef = "Sin asignar", "Sin asignar", "Sin asignar"
+	for _, m := range meals {
+		if m.DayOfWeek == weekday {
+			chefName := "Sin asignar"
+			if m.ChefID != nil {
+				if name, ok := userMap[*m.ChefID]; ok {
+					chefName = name
+				}
+			}
+			switch m.MealType {
+			case "breakfast":
+				breakfastChef = chefName
+			case "lunch":
+				lunchChef = chefName
+			case "dinner":
+				dinnerChef = chefName
+			}
+		}
+	}
+
+	var sb strings.Builder
+	sb.WriteString("*Dashboard del Hogar - Semana Actual*\n")
+	sb.WriteString(fmt.Sprintf("📅 *Día:* %s (%s, Hora local)\n\n", nowLocal.Format("02/01/2006"), daysSp[weekday]))
+	
+	sb.WriteString("*Limpieza del Hogar*\n")
+	sb.WriteString(fmt.Sprintf("Progreso: %d%% (%d/%d tareas)\n", pctDone, completedTasks, totalTasks))
+	sb.WriteString(fmt.Sprintf("`[%s]`\n\n", bar))
+
+	sb.WriteString("*Finanzas y Pagos*\n")
+	sb.WriteString(fmt.Sprintf("• Pagos pendientes de validación: %d\n\n", pendingPaymentsCount))
+
+	sb.WriteString("*Turnos de Cocina de Hoy*\n")
+	sb.WriteString(fmt.Sprintf("• Desayuno: %s\n", breakfastChef))
+	sb.WriteString(fmt.Sprintf("• Almuerzo: %s\n", lunchChef))
+	sb.WriteString(fmt.Sprintf("• Cena: %s\n", dinnerChef))
+
+	b.sendText(userID, sb.String())
 }

@@ -1,162 +1,52 @@
-# 🏠 Roomie Discipline Bot (Go + CockroachDB + Groq)
+# 🏠 Roomie Discipline Bot (V2 Production Edition)
 
-Un backend de bot de Telegram multi-tenant potente y optimizado escrito en Go. Permite la convivencia inteligente entre roomies (gestión de alquileres, limpieza y turnos de cocina) combinándolo con disciplina individual (hábitos, metas de ejercicio, alimentación y búsqueda de empleo).
+Un backend de bot de Telegram multi-tenant potente y optimizado escrito en Go. Permite la convivencia inteligente entre roomies (gestión de alquileres, limpieza y turnos de cocina) y de disciplina individual (hábitos, metas de ejercicio y recordatorios), combinado con herramientas de CRM e inventarios para emprendimientos personales y compartidos (Habitando Home y Pineapple).
 
-Cuenta con un procesamiento inteligente del lenguaje natural a través de **Groq API** optimizado para bajo consumo de tokens.
+Cuenta con procesamiento inteligente de lenguaje natural mediante la **API de Groq** (Llama 3.1 8B) optimizado para el ahorro y compresión continua de tokens.
 
 ---
 
 ## 🛠️ Stack Tecnológico
 - **Lenguaje:** Go (Golang) v1.25+
-- **Base de Datos:** CockroachDB / PostgreSQL (mediante el driver `jackc/pgx/v5`)
-- **APIs:** Telegram Bot API (Long Polling estructurado) & Groq Cloud API (Llama 3.1 8B)
-- **Capa de Configuración:** `joho/godotenv` para entorno local
+- **Base de Datos:** PostgreSQL / Neon Serverless (driver `jackc/pgx/v5`)
+- **APIs:** Telegram Bot API (Long Polling estructurado) & Groq Cloud API
+- **Infraestructura:** Render.com (Web Services con soporte de salud en puerto de red)
+- **Monitoreo/Migraciones:** Sistema de auto-migraciones de esquema y inicializador embebido.
 
 ---
 
-## 📐 Arquitectura del Proyecto (DDD & Clean Architecture)
-
-El proyecto sigue una estructura limpia para asegurar la separación de responsabilidades y evitar cuellos de botella por concurrencia en llamadas de Telegram:
-
-```text
-home-bot/
-├── cmd/
-│   └── bot/
-│       └── main.go         # Punto de entrada. Inicialización y graceful shutdown.
-├── db/
-│   └── migrations/
-│       └── 0001_init.sql   # Sentencias de migración de la DB (se auto-ejecutan al iniciar).
-├── internal/
-│   ├── config/
-│   │   └── config.go       # Cargador de variables de entorno (.env).
-│   ├── domain/             # Capa del Dominio (Entidades e Interfaces de Repositorios).
-│   │   ├── user.go
-│   │   ├── payment.go
-│   │   ├── task.go
-│   │   ├── meal.go
-│   │   ├── habit.go
-│   │   └── ai.go
-│   ├── application/        # Capa de Aplicación (Servicios y Casos de Uso del negocio).
-│   │   └── services.go
-│   └── infrastructure/     # Capa de Infraestructura (Adaptadores externos).
-│       ├── db/
-│       │   ├── postgres_repo.go # Repositorios con pgxpool y transacciones seguras.
-│       │   └── migration.go     # Ejecutor automático de migraciones embebidas.
-│       ├── groq/
-│       │   └── groq_client.go   # Cliente HTTP para Groq y resumidor de tokens.
-│       └── telegram/
-│           └── telegram_bot.go  # Manejador del bot, FSM de estados e inline keyboards.
-├── .env.example
-├── go.mod
-└── go.sum
-```
-
 ---
 
-## 🤖 Optimización de Tokens de IA (Groq)
-Para reducir drásticamente el uso de tokens y optimizar costos:
-1. **Lógica Híbrida:** Las operaciones rutinarias (como marcar una tarea como completada, registrar comidas o aprobar un pago) se realizan mediante comandos (`/tareas`, `/pagar`, `/gimnasio`) y **Inline Keyboards** interactivos directamente en Telegram.
-2. **Context Window Reducida (Contexto Deslizante):** No enviamos el historial completo de chats en cada petición. El sistema mantiene en la tabla `ai_context` un resumen condensado continuo del historial generado por Groq (limitado a 150 palabras), actualizándolo dinámicamente con cada nueva interacción del usuario.
-3. **System Prompts Compactos:** Instrucciones directas de sistema obligan a Groq a responder en un tono estricto, directo y en máximo **2 frases**.
+## 📐 Funcionalidades de Producción (V2 Activo)
 
----
+### 🏠 Convivencia & Coexistencia Grupal
+- **/creargrupo y /unirse:** Registro multi-tenant. Genera un identificador único (UUID) para compartir con compañeros de cuarto.
+- **/roomies:** Visualiza los miembros actuales del hogar y sus roles asignados (Admin o Roomie).
+- **/tareas:** Lista las tareas de limpieza del hogar con botones inline (`✅ Completada`, `🗑️ Eliminar`).
+- **/creartarea:** Creador interactivo secuencial (Descripción -> Asignado -> Fecha de Vencimiento DD/MM).
+- **/pagar:** Sube comprobantes de transferencias bancarias de alquiler/servicios como imagen.
+- **/pagospendientes:** Muestra las transferencias pendientes. El Administrador del hogar puede usar botones inline para `✅ Aprobar` o `❌ Rechazar` el pago.
+- **/cocina:** Menú consolidado interactivo y silencioso (1 solo mensaje de chat) para visualizar el rol semanal y asignarse turnos sin generar notificaciones ruidosas.
+- **/asignarcocina:** Permite al Administrador asignar de forma interactiva turnos de cocina a roomies específicos.
+- **/dashboard:** Muestra un resumen ejecutivo consolidado del estado actual del hogar (porcentaje de avance de tareas de limpieza, cantidad de cobros pendientes y los encargados de la cocina de hoy).
 
-## 🚀 Guía de Instalación y Ejecución
+### 🏋️‍♂️ Disciplina & Hábitos Personales
+- **/habitos:** Lista tus hábitos personales, rachas consecutivas (streak) y progreso. Incluye botón interactivo `🔥 Completar Hoy` (que cambia a `✅ Completado Hoy` para evitar duplicados en la base de datos) y `🗑️ Borrar`.
+- **/crearhabito:** Registra un hábito diario o para días específicos con alerta horaria local (HH:MM) configurada en tu zona horaria.
 
-### 1. Clonar el repositorio y configurar entorno
-Crea tu archivo `.env` en la raíz del proyecto basándote en la plantilla `.env.example`:
+### 💼 CRM de Negocios & Catálogo
+- **/negocios:** Panel de control de emprendimientos del usuario. Permite registrar múltiples tiendas (como "Habitando Home" de muebles/cojines o "Pineapple" de tecnología) y co-administrarlas.
+- **Compartición de Tiendas:** Permite generar un código UUID de acceso desde el botón `👥 Compartir Acceso` del panel. Un socio o colaborador puede usar `/unirstienda [ID_TIENDA]` para co-administrar productos y pedidos.
+- **Venta de Catálogo:** Registra el producto vendido del inventario restando automáticamente las unidades disponibles.
+- **Pedido Personalizado:** Flujo para registrar clientes con adelanto inicial depositado, saldo pendiente de cobro automático, dirección y costo de envío.
+- **Control de Estados:** Actualiza el estado del pedido a `Pendiente de Envío`, `Enviado`, `Entregado` y registra el cobro final del saldo restante.
 
-```bash
-cp .env.example .env
-```
+### 💵 Cobros Interactivos `/asignarpago`
+- Permite al Administrador del hogar seleccionar de forma interactiva un roomie mediante botones inline, e ingresar el monto a cobrar. Esto genera automáticamente una deuda en estado pendiente en el registro del roomie para que suba su comprobante con `/pagar`.
 
-Edita `.env` agregando tus credenciales:
-```env
-TELEGRAM_BOT_TOKEN=tu_token_de_telegram
-GROQ_API_KEY=tu_api_key_de_groq
-COCKROACH_DB_URL=postgresql://root@localhost:26257/defaultdb?sslmode=disable
-```
+### 🔀 Autocompletado de Comandos
+- Al escribir `/` en Telegram, se despliega automáticamente el menú nativo de comandos con sus respectivas descripciones estructuradas de forma limpia.
 
-### 2. Levantar CockroachDB (Localmente con Docker)
-Si no dispones de una instancia activa de CockroachDB, puedes arrancar una de prueba en local con el siguiente comando:
+### 🔇 UX Limpia y Formato Corporativo
+- Reducción de emojis redundantes, respuestas visuales silenciosas (edición de mensajes existentes inline en lugar de enviar nuevas burbujas de notificación) y diseño estructurado en Markdown para máxima legibilidad.
 
-```bash
-docker run -d --name cockroach -p 26257:26257 -p 8080:8080 cockroachdb/cockroach:v23.1.11 start-single-node --insecure
-```
-
-### 3. Compilar y Arrancar el Bot
-Las migraciones de la base de datos se ejecutan **automáticamente** en cuanto el backend arranca.
-
-Para compilar y correr:
-```bash
-go run cmd/bot/main.go
-```
-
-Para compilar un binario:
-```bash
-go build -o bin/bot cmd/bot/main.go
-./bin/bot
-```
-
----
-
-## 🌐 Despliegue en Producción
-
-Para desplegar el bot en un entorno de producción (ej. un VPS Linux o plataforma en la nube), sigue estos pasos divididos por responsabilidades:
-
-### 1. Pasos que debes realizar tú (Usuario)
-1. **Configurar el Bot en Telegram (BotFather)**:
-   - Chatea con `@BotFather` en Telegram y usa el comando `/newbot` para registrar tu bot de producción.
-   - Guarda el token generado (`TELEGRAM_BOT_TOKEN`).
-2. **Obtener API Key de Groq**:
-   - Regístrate en [Groq Cloud Console](https://console.groq.com/) y genera una API key (`GROQ_API_KEY`).
-3. **Aprovisionar la Base de Datos**:
-   - Crea una base de datos en [CockroachDB Serverless](https://www.cockroachlabs.com/products/cockroachdb-serverless/) o PostgreSQL (como Supabase, Render o RDS).
-   - Obtén la cadena de conexión segura (URI). *Nota: En producción es fundamental usar SSL (`sslmode=verify-full` o similar)*.
-4. **Configurar Servidor y Variables**:
-   - Asegúrate de tener Docker instalado en tu servidor/VPS.
-   - Crea un archivo `.env` en el servidor con tus variables reales de producción:
-     ```env
-     TELEGRAM_BOT_TOKEN=tu_token_de_produccion
-     GROQ_API_KEY=tu_api_key_de_groq_produccion
-     COCKROACH_DB_URL=tu_conexion_db_con_ssl
-     ```
-
-### 2. Pasos de Despliegue (Utilizando Docker)
-Hemos preparado la infraestructura de Docker para que el despliegue sea lo más rápido y seguro posible.
-
-* **Construir la imagen de Docker manualmente**:
-  ```bash
-  docker build -t home-bot:latest .
-  ```
-
-* **Desplegar usando Docker Compose (Recomendado)**:
-  Para iniciar el bot en segundo plano con políticas de reinicio automático y límites en el tamaño de logs:
-  ```bash
-  docker compose -f docker-compose.prod.yml up -d
-  ```
-
-* **Ver los logs en tiempo real**:
-  ```bash
-  docker compose -f docker-compose.prod.yml logs -f --tail=100
-  ```
-
-* **Detener el bot**:
-  ```bash
-  docker compose -f docker-compose.prod.yml down
-  ```
-
----
-
-## 📖 Comandos de Telegram Soportados
-- `/start` - Inicializa el bot y te registra en la DB.
-- `/creargrupo` - Inicia el flujo para crear un nuevo departamento/grupo de roomies.
-- `/unirse` - Únete al departamento de tus roomies mediante el ID del grupo.
-- `/tareas` - Ver tareas de limpieza pendientes. Incluye botón interactivo `[✅ Completar]`.
-- `/creartarea` - Agrega una nueva tarea de limpieza grupal.
-- `/pagar` - Registrar un pago de alquiler o servicio (ingresar monto y subir foto de comprobante).
-- `/pagospendientes` - Ver reportes de pagos. Si eres Admin, te dará botones inline de `[✅ Aprobar]` y `[❌ Rechazar]`.
-- `/cocina` - Ver los turnos de cocina (Desayuno, Almuerzo, Cena) de la semana. Permite asignarte haciendo click sobre los botones inline disponibles.
-- `/habitos` - Consultar tus metas personales y progreso.
-- `/crearhabito` - Registrar un nuevo hábito (gimnasio, correr, postulaciones a empleo).
-- `/cancelar` - Cancela cualquier flujo activo de registro/wizard actual.
